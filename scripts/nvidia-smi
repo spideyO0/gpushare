@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""
+nvidia-smi shim for gpushare clients.
+
+On machines without a real NVIDIA GPU, this script queries the remote
+gpushare server via the client library and displays GPU info in the
+same format as the real nvidia-smi.
+
+Works on macOS, Linux (without GPU), and Windows.
+"""
+
+import ctypes
+import ctypes.util
+import os
+import sys
+import time
+import argparse
+
+# Find our library
+def find_lib():
+    candidates = [
+        "/usr/local/lib/gpushare/libgpushare_client.so",
+        "/usr/local/lib/gpushare/libgpushare_client.dylib",
+        "/usr/local/lib/libnvidia-ml.so.1",
+        "/usr/local/lib/libnvidia-ml.dylib",
+    ]
+    # Also check relative to this script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    build_dir = os.path.join(script_dir, "..", "build")
+    for ext in [".so.1.0.0", ".so", ".dylib"]:
+        candidates.append(os.path.join(build_dir, f"libgpushare_client{ext}"))
+
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+
+    # Try system library search
+    path = ctypes.util.find_library("nvidia-ml")
+    if path:
+        return path
+    path = ctypes.util.find_library("gpushare_client")
+    if path:
+        return path
+    return None
+
+
+class NvmlMemory(ctypes.Structure):
+    _fields_ = [
+        ("total", ctypes.c_ulonglong),
+        ("free", ctypes.c_ulonglong),
+        ("used", ctypes.c_ulonglong),
+    ]
+
+class NvmlUtilization(ctypes.Structure):
+    _fields_ = [
+        ("gpu", ctypes.c_uint),
+        ("memory", ctypes.c_uint),
+    ]
+
+class NvmlPciInfo(ctypes.Structure):
+    _fields_ = [
+        ("busIdLegacy", ctypes.c_char * 16),
+        ("domain", ctypes.c_uint),
+        ("bus", ctypes.c_uint),
+        ("device", ctypes.c_uint),
+        ("pciDeviceId", ctypes.c_uint),
+        ("pciSubSystemId", ctypes.c_uint),
+        ("busId", ctypes.c_char * 32),
+    ]
+
+
+def main():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--query-gpu", default=None)
+    parser.add_argument("--format", default=None)
+    parser.add_argument("-L", "--list-gpus", action="store_true")
+    parser.add_argument("-l", "--loop", type=int, default=None, metavar="SEC")
+    parser.add_argument("--help", "-h", action="store_true")
+    args, _ = parser.parse_known_args()
+
+    lib_path = find_lib()
+    if not lib_path:
+        print("NVIDIA-SMI has failed because it couldn't find the gpushare client library.", file=sys.stderr)
+        print("Make sure gpushare client is installed.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        lib = ctypes.CDLL(lib_path)
+    except OSError as e:
+        print(f"Failed to load library: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Init NVML
+    err = lib.nvmlInit_v2()
+    if err != 0:
+        print("NVIDIA-SMI has failed because the gpushare server is not reachable.", file=sys.stderr)
+        print("Check that the server is running and the client config is correct.", file=sys.stderr)
+        sys.exit(1)
+
+    # Get device info
+    dev = ctypes.c_void_p()
+    lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev))
+
+    name = ctypes.create_string_buffer(256)
+    lib.nvmlDeviceGetName(dev, name, 256)
+    gpu_name = name.value.decode()
+
+    driver_ver = ctypes.create_string_buffer(80)
+    lib.nvmlSystemGetDriverVersion(driver_ver, 80)
+
+    mem = NvmlMemory()
+    lib.nvmlDeviceGetMemoryInfo(dev, ctypes.byref(mem))
+
+    util = NvmlUtilization()
+    lib.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(util))
+
+    temp = ctypes.c_uint(0)
+    lib.nvmlDeviceGetTemperature(dev, 0, ctypes.byref(temp))
+
+    power = ctypes.c_uint(0)
+    lib.nvmlDeviceGetPowerUsage(dev, ctypes.byref(power))
+
+    power_limit = ctypes.c_uint(0)
+    lib.nvmlDeviceGetEnforcedPowerLimit(dev, ctypes.byref(power_limit))
+
+    fan = ctypes.c_uint(0)
+    lib.nvmlDeviceGetFanSpeed(dev, ctypes.byref(fan))
+
+    uuid = ctypes.create_string_buffer(80)
+    lib.nvmlDeviceGetUUID(dev, uuid, 80)
+
+    major = ctypes.c_int(0)
+    minor = ctypes.c_int(0)
+    lib.nvmlDeviceGetCudaComputeCapability(dev, ctypes.byref(major), ctypes.byref(minor))
+
+    cuda_ver = ctypes.c_int(0)
+    lib.nvmlSystemGetCudaDriverVersion(ctypes.byref(cuda_ver))
+    cuda_major = cuda_ver.value // 1000
+    cuda_minor = (cuda_ver.value % 1000) // 10
+
+    pci = NvmlPciInfo()
+    lib.nvmlDeviceGetPciInfo(dev, ctypes.byref(pci))
+    bus_id = pci.busId.decode() if pci.busId else "00000000:00:00.0"
+
+    # CSV query mode (what gpu.py uses)
+    if args.query_gpu:
+        fields = [f.strip() for f in args.query_gpu.split(",")]
+        is_csv = args.format and "csv" in args.format
+        no_header = args.format and "noheader" in args.format
+        no_units = args.format and "nounits" in args.format
+
+        field_map = {
+            "name": gpu_name,
+            "driver_version": driver_ver.value.decode(),
+            "memory.total": f"{mem.total // (1024*1024)}" + ("" if no_units else " MiB"),
+            "memory.used": f"{mem.used // (1024*1024)}" + ("" if no_units else " MiB"),
+            "memory.free": f"{mem.free // (1024*1024)}" + ("" if no_units else " MiB"),
+            "temperature.gpu": str(temp.value),
+            "utilization.gpu": str(util.gpu) + ("" if no_units else " %"),
+            "utilization.memory": str(util.memory) + ("" if no_units else " %"),
+            "power.draw": f"{power.value / 1000:.2f}" + ("" if no_units else " W"),
+            "power.limit": f"{power_limit.value / 1000:.2f}" + ("" if no_units else " W"),
+            "fan.speed": str(fan.value) + ("" if no_units else " %"),
+            "uuid": uuid.value.decode(),
+            "pci.bus_id": bus_id,
+            "compute_cap": f"{major.value}.{minor.value}",
+            "clocks.current.sm": "0 MHz",
+            "clocks.current.memory": "0 MHz",
+            "index": "0",
+            "gpu_name": gpu_name,
+            "gpu_bus_id": bus_id,
+            "gpu_uuid": uuid.value.decode(),
+        }
+
+        if is_csv:
+            if not no_header:
+                print(", ".join(fields))
+            values = [field_map.get(f, "[N/A]") for f in fields]
+            print(", ".join(values))
+        else:
+            for f in fields:
+                print(f"{f}: {field_map.get(f, '[N/A]')}")
+
+        lib.nvmlShutdown()
+        return
+
+    # List GPUs mode
+    if args.list_gpus:
+        print(f"GPU 0: {gpu_name} (UUID: {uuid.value.decode()})")
+        lib.nvmlShutdown()
+        return
+
+    # Default display (mimic nvidia-smi output)
+    def display():
+        ts = time.strftime("%a %b %d %H:%M:%S %Y")
+        mem_used_mb = mem.used // (1024 * 1024)
+        mem_total_mb = mem.total // (1024 * 1024)
+        pwr_w = power.value / 1000
+        pwr_limit_w = power_limit.value / 1000
+
+        print(f"{ts}")
+        print(f"+-----------------------------------------------------------------------------------------+")
+        print(f"| NVIDIA-SMI {driver_ver.value.decode():<15s} Driver Version: {driver_ver.value.decode():<15s} CUDA Version: {cuda_major}.{cuda_minor:<5} |")
+        print(f"|--------------------------------------------+------------------------+------------------+")
+        print(f"| GPU  Name                     Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |")
+        print(f"| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |")
+        print(f"|=============================================+========================+====================|")
+        print(f"|   0  {gpu_name:<29s} Off | {bus_id:<15s}  Off |                  N/A |")
+        print(f"| {fan.value:>3d}%   {temp.value}C    P0     {pwr_w:>6.1f}W / {pwr_limit_w:>6.1f}W |   {mem_used_mb:>5d}MiB / {mem_total_mb:>5d}MiB |    {util.gpu:>3d}%      Default |")
+        print(f"+--------------------------------------------+------------------------+------------------+")
+        print(f"")
+        print(f"+-----------------------------------------------------------------------------------------+")
+        print(f"| Processes:                                                                              |")
+        print(f"|  GPU   GI   CI        PID   Type   Process name                          GPU Memory    |")
+        print(f"|        ID   ID                                                           Usage         |")
+        print(f"|=========================================================================================|")
+        print(f"|  No running processes found (remote GPU via gpushare)                                   |")
+        print(f"+-----------------------------------------------------------------------------------------+")
+        print(f"  [gpushare] Remote GPU at {os.environ.get('GPUSHARE_SERVER', 'configured server')}")
+
+    if args.loop:
+        try:
+            while True:
+                # Refresh live data
+                lib.nvmlDeviceGetMemoryInfo(dev, ctypes.byref(mem))
+                lib.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(util))
+                lib.nvmlDeviceGetTemperature(dev, 0, ctypes.byref(temp))
+                lib.nvmlDeviceGetPowerUsage(dev, ctypes.byref(power))
+                lib.nvmlDeviceGetFanSpeed(dev, ctypes.byref(fan))
+                os.system("clear" if os.name != "nt" else "cls")
+                display()
+                time.sleep(args.loop)
+        except KeyboardInterrupt:
+            pass
+    else:
+        display()
+
+    lib.nvmlShutdown()
+
+
+if __name__ == "__main__":
+    main()

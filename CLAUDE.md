@@ -1,0 +1,167 @@
+# gpushare — GPU over IP
+
+## What this project is
+
+gpushare shares an NVIDIA GPU over a TCP network. One server machine (Arch Linux, RTX 5070 12GB, CUDA 13.1, SM 12.0 Blackwell) serves GPU compute to client machines (Linux, macOS, Windows) that have no local GPU. Applications on clients see the remote GPU as native — no code changes, no wrappers, no LD_PRELOAD.
+
+## Architecture
+
+### Core components
+
+**Server** (`server/server.cpp`, ~900 lines):
+- C++ TCP server using pthreads (one thread per client)
+- Listens on port 9847 (configurable)
+- Executes real CUDA calls on behalf of clients
+- Per-client resource tracking (allocated memory, streams, events, modules — all cleaned up on disconnect)
+- Per-client stats (ops count, bytes in/out, memory allocated)
+- LAN/WAN auto-detection: enumerates local interfaces at startup, classifies each client by subnet match, applies different TCP buffer sizes (8MB LAN, 2MB WAN)
+- Live GPU status via nvidia-smi subprocess parsing
+- Config file at /etc/gpushare/server.conf
+- CRITICAL: each client thread calls `cudaSetDevice(g_device)` to ensure CUDA context is current (Bug #1)
+
+**Client library** (`client/gpushare_client.cpp`, ~900 lines):
+- Single shared library (.so/.dylib/.dll) that exports three API layers:
+  - CUDA Runtime API (27 functions): cudaMalloc, cudaMemcpy, cudaStreamCreate, etc.
+  - CUDA Driver API (56 functions): cuInit, cuMemAlloc, cuModuleLoadData, cuLaunchKernel, etc.
+  - NVML API (29 functions): nvmlInit, nvmlDeviceGetCount, nvmlDeviceGetMemoryInfo, etc.
+- Installed as symlinks for ALL CUDA libraries (libcudart.so, libcuda.so.1, libnvidia-ml.so.1, libcublas.so, libcudnn.so, libcufft.so, libcusparse.so, libcusolver.so, libcurand.so, libnvrtc.so, libnvjpeg.so)
+- Auto-reads server address from config files (~/.config/gpushare/client.conf, /etc/gpushare/client.conf) — no env vars needed
+- MSVC-compatible: uses PACKED_STRUCT_BEGIN/END macros, SSIZE_T typedef, DllMain for cleanup, __declspec(dllexport)
+- Thread-safe: single socket protected by mutex, atomic request IDs
+
+**Generated stubs — two tiers:**
+1. `client/generated_stubs.cpp` + `server/generated_dispatch.cpp` (from `codegen/generate_stubs.py`):
+   - 133 functions with full argument-aware RPC serialization
+   - Covers critical cuBLAS (GEMM, GemmEx, strided batched), cuDNN (convolution, batchnorm, pooling, softmax, activation), and additional CUDA Runtime functions
+   - Server dispatch uses dlsym() to call real library functions, with handle mapping for opaque library handles
+   - Uses GS_OP_LIB_CALL opcode with [lib_id:u8][func_id:u16][serialized_args]
+   - Each arg has a kind: SCALAR, DEV_PTR, HANDLE, HANDLE_OUT, HOST_IN, HOST_OUT
+
+2. `client/generated_all_stubs.cpp` + `server/generated_all_dispatch.cpp` (from `codegen/parse_headers.py`):
+   - 2,432 weak symbol stubs parsed from actual CUDA headers in /opt/cuda/include/
+   - Ensures applications can LINK against our library for every CUDA symbol
+   - Weak symbols get overridden by tier-1 full-RPC functions
+   - Server has a dlsym-based resolver for all libraries
+
+**Total: 2,565 exported functions across 12 CUDA libraries.**
+
+### Protocol (`include/gpushare/protocol.h`)
+
+Binary protocol over TCP. 16-byte header:
+```
+[4B magic 0x47505553 "GPUS"] [4B total_length] [4B request_id] [2B opcode] [2B flags]
+```
+
+Key opcodes:
+- 0x0001 INIT, 0x0002 CLOSE, 0x0003 PING
+- 0x0010-0x0012 Device management
+- 0x0020-0x0025 Memory (malloc, free, memcpy H2D/D2H/D2D, memset)
+- 0x0030-0x0033 Module/kernel (load PTX, get function, launch)
+- 0x0040-0x0048 Streams and events
+- 0x0050-0x0052 Fat binary registration
+- 0x0060 Stats, 0x0070 Live GPU status
+- 0x0080 Generic library call (cuBLAS/cuDNN/etc)
+
+All structs use `PACKED_STRUCT_BEGIN`/`PACKED_STRUCT_END` macros for MSVC portability.
+
+### Monitoring
+
+- **Web dashboard** (`dashboard/app.py`): Zero-dependency Python HTTP server, connects to gpushare server via binary protocol, polls nvidia-smi, serves embedded HTML/CSS/JS. Has POST /api/server (change IP) and POST /api/service (start/stop).
+- **TUI** (`tui/monitor.py`): Curses-based, stdlib only. Keys: e=edit IP, s=start, x=stop, a=auto-stop, r=reconnect, q=quit.
+- **Windows tray** (`client/gpu_tray_windows.pyw`): pystray + pillow. Live temp/util icon, right-click menu with server change dialog (tkinter), service control, nvidia-smi.
+- **nvidia-smi shim** (`scripts/nvidia-smi`): Python script that queries NVML via ctypes, outputs matching nvidia-smi format including CSV query mode.
+
+### Install scripts
+
+All scripts support: `--force` (full reinstall), upgrade detection (IS_UPGRADE), config preservation, stale CMake cache cleaning.
+
+- `install-server-arch.sh`: Arch Linux server setup, systemd services, codegen step, firewall
+- `install-client-linux.sh`: 9 distro families auto-detected, auto-installs deps, SELinux/AppArmor handling, 32+ symlinks
+- `install-client-macos.sh`: Homebrew deps, quarantine clearing on ALL files, launchd plist, SIP-safe shebangs
+- `install-client-windows.ps1`: VS/MinGW/MSYS2 auto-detect, version-to-year mapping for CMake generator, 12 DLL copies, registry GPU adapter, Defender exclusion, startup shortcut for tray widget
+- `uninstall.sh`: Cross-platform (Linux/macOS), dry-run support
+- `uninstall-windows.ps1`: 9-component removal including tray process kill, registry cleanup, startup shortcut
+
+## Critical gotchas (from development)
+
+1. **CUDA context in threads**: Every client thread MUST call `cudaSetDevice()` before any driver API call (cuModuleLoadData, cuLaunchKernel). Without it: error 201.
+2. **PTX version**: CUDA 13.1 = PTX ISA 9.1, SM 12.0. Use `nvcc -ptx -arch=sm_120` to generate correct PTX. Old versions (7.0, 8.7) fail with error 218.
+3. **cuModuleLoadData null termination**: The server MUST null-terminate PTX data before passing to cuModuleLoadData. Copy to a std::vector and append \0.
+4. **MSVC portability**: No __attribute__((packed)), no ssize_t, no __attribute__((destructor)), no __attribute__((visibility)). All guarded by #ifdef _MSC_VER / _WIN32.
+5. **macOS quarantine**: Must run `xattr -dr com.apple.quarantine` on EVERY installed file. Use /bin/bash and /usr/bin/python3 (full paths) in shebangs, not /usr/bin/env.
+6. **PowerShell**: No non-ASCII characters (em-dashes break parsing). No here-strings (@"..."@) — use string concatenation with backtick-r-n. Use single-quotes for regex patterns.
+7. **bind=0.0.0.0**: Treat as "all interfaces" (same as empty), not a specific IPv4 address.
+8. **rpc_simple returns int32_t**, not cudaError_t. All callers in gpushare_client.cpp must cast: `(cudaError_t)rpc_simple(...)`.
+9. **goto over initialization**: C++ forbids goto jumping over variable declarations. Generated dispatch uses `do{...}while(0)` + `break` pattern instead.
+10. **Struct packing Python**: gs_device_props_t is 352 bytes packed. Python format: `"<QQ" + "i"*14 + "QQQ"` at offset 256 after the name field.
+
+## How to test
+
+```bash
+# Build
+cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j$(nproc)
+
+# Quick test cycle
+./build/gpushare-server &
+sleep 2
+GPUSHARE_SERVER=localhost:9847 ./build/test_basic       # C++ test
+PYTHONPATH=python python examples/test_python.py localhost  # Python test
+PYTHONPATH=python python examples/stress_test.py localhost --duration 10  # Stress
+kill %1
+
+# Check symbols
+nm -D build/libgpushare_client.so.1.0.0 | grep " T " | wc -l  # should be ~2565
+
+# Validate scripts
+for f in scripts/install-*.sh scripts/uninstall.sh; do bash -n "$f" && echo "$f: OK"; done
+
+# Check PS scripts for non-ASCII (causes parse errors on Windows)
+grep -Pn '[^\x00-\x7F]' scripts/install-client-windows.ps1 scripts/uninstall-windows.ps1
+```
+
+## How to add a new full-RPC function
+
+1. Find signature in CUDA header (e.g., /opt/cuda/include/cublas_api.h)
+2. Add to LIBS dict in `codegen/generate_stubs.py` with arg definitions
+3. Each arg: (name, type, kind, byte_size) — kinds: SCALAR, DEV_PTR, HANDLE, HANDLE_OUT, HOST_IN, HOST_OUT
+4. Run `python codegen/generate_stubs.py`
+5. Rebuild: `cd build && make -j$(nproc)`
+6. Test with ctypes or an application that uses that function
+
+## Key design decisions
+
+- **One library for all APIs**: Instead of separate libs for each NVIDIA library, one .so exports everything. Simpler installation, fewer symlinks to manage.
+- **Weak symbols for coverage**: parse_headers.py generates weak stubs so apps LINK successfully even for functions without full RPC. Better than crashing with "symbol not found".
+- **Config file over env vars**: Env vars don't persist across sessions and break in venvs. Config files at well-known paths work everywhere.
+- **LAN/WAN auto-detect**: Server checks client IP against local interface subnets. No user configuration needed.
+- **Per-client thread model**: Simple, each client gets full CUDA context. Trade-off: more memory per client, but simpler than async multiplexing.
+
+## File layout
+
+```
+server/server.cpp           — GPU server (TCP + CUDA)
+server/generated_dispatch.cpp — Auto-gen: 133 cuBLAS/cuDNN dispatch handlers
+server/generated_all_dispatch.cpp — Auto-gen: dlsym resolver for all libraries
+client/gpushare_client.cpp  — Client lib (runtime + driver + NVML, 112 hand-written functions)
+client/generated_stubs.cpp  — Auto-gen: 133 cuBLAS/cuDNN client stubs
+client/generated_all_stubs.cpp — Auto-gen: 2432 weak symbol exports
+include/gpushare/protocol.h — Wire protocol + packed structs
+include/gpushare/cuda_defs.h — CUDA/NVML/Driver types (no CUDA toolkit needed)
+codegen/generate_stubs.py   — Codegen: function defs → full RPC stubs
+codegen/parse_headers.py    — Codegen: CUDA headers → weak stubs
+dashboard/app.py            — Web dashboard (1147 lines, zero dependencies)
+tui/monitor.py              — Terminal UI (891 lines, curses only)
+client/gpu_tray_windows.pyw — Windows tray widget (pystray + pillow)
+python/gpushare/__init__.py — Python client library
+scripts/nvidia-smi          — nvidia-smi shim (Python, ctypes → NVML)
+examples/stress_test.py     — Stress test + connection validator
+examples/gpu.py             — GPU detection (4 methods)
+CMakeLists.txt              — Build: server (needs CUDA) + client (no CUDA)
+```
+
+## Current state
+
+- Server: Arch Linux, RTX 5070, CUDA 13.1, systemd service running
+- Tested clients: macOS (M-series MacBook), Windows 11 (VS 2026)
+- API exports: 2,565 functions (112 hand-written + 133 generated RPC + 2,432 weak stubs)
+- Verified working: GPU detection (NVML + CUDA), memory ops, PTX kernel execution, data transfer round-trip, stress test at ~2 GB/s local / ~44 MB/s over 1GbE LAN

@@ -1,0 +1,18 @@
+[Unit]
+Description=gpushare GPU sharing server
+After=network.target nvidia-persistenced.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/gpushare-server --port 9847 --device 0
+Restart=on-failure
+RestartSec=5
+Nice=-10
+LimitMEMLOCK=infinity
+
+# Security hardening
+NoNewPrivileges=false
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target
