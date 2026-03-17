@@ -427,6 +427,21 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item -Force $clientDll "$InstallDir\gpushare_client.dll"
 Write-Ok "Installed gpushare_client.dll"
 
+# Copy MinGW runtime DLLs if the build used MinGW (needed if not statically linked)
+if ($Compiler -eq "mingw") {
+    $mingwBin = Split-Path (Get-Command g++.exe -ErrorAction SilentlyContinue).Source -ErrorAction SilentlyContinue
+    if ($mingwBin) {
+        $runtimeDlls = @("libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll")
+        foreach ($rtDll in $runtimeDlls) {
+            $rtPath = Join-Path $mingwBin $rtDll
+            if (Test-Path $rtPath) {
+                Copy-Item -Force $rtPath "$InstallDir\$rtDll"
+            }
+        }
+        Write-Ok "MinGW runtime DLLs copied"
+    }
+}
+
 # Create transparent replacement copies for each API
 Write-Info "Creating transparent CUDA/NVML replacement DLLs..."
 

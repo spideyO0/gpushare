@@ -48,6 +48,13 @@ if(BUILD_CLIENT)
     # Don't link against CUDA — that's the whole point
     if(WIN32)
         target_link_libraries(gpushare_client PRIVATE ws2_32)
+        # Statically link MinGW runtimes so the DLL has no external dependencies
+        # (libstdc++-6.dll, libgcc_s_seh-1.dll, libwinpthread-1.dll)
+        if(MINGW)
+            target_link_options(gpushare_client PRIVATE
+                -static-libgcc -static-libstdc++ -Wl,-Bstatic -lpthread -Wl,-Bdynamic
+            )
+        endif()
     else()
         # dl is needed for dlopen/dlsym (local GPU passthrough)
         target_link_libraries(gpushare_client PRIVATE dl)
