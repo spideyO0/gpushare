@@ -113,7 +113,7 @@ These phases were implemented as the initial rCUDA-parity push.
 
 ---
 
-## Phase 7: Adaptive Buffer Pool Sizing (planned)
+## Phase 7: Adaptive Buffer Pool Sizing (done)
 
 **Gap:** rCUDA dynamically adapts buffer count and size based on transfer size ranges. gpushare uses fixed 4 x 4MB. A 1KB transfer wastes a 4MB pool slot. A 100MB transfer gets one 4MB pinned buffer and the rest is `malloc`.
 
@@ -311,7 +311,7 @@ done     Phase 4: Client Request Pipelining
 done     Phase 5: Client-Side Pinned Staging ──────── completes rCUDA three-stage pipeline
 done     Phase 6: D2H Speculative Prefetch ────────── GPU prefetches next chunk while sending current
            │
-planned  Phase 7: Adaptive Buffer Sizing ──────────── rCUDA's configurable tiered pools
+done     Phase 7: Adaptive Buffer Sizing ──────────── rCUDA's configurable tiered pools
 planned  Phase 8: Network Transport Abstraction ───── prerequisite for RDMA
 planned  Phase 9: InfiniBand / RDMA Transport ─────── rCUDA's key advantage (97.7% wire speed)
 planned  Phase 10: Transfer Compression ────────────── rCUDA 2022 pipelined compression
@@ -333,7 +333,7 @@ research Phase 13: GPUDirect RDMA ───────────────�
 | Chunked pipelining | Yes | Yes (Phase 3) | Yes |
 | Client request pipelining | Yes | Yes (Phase 4) | Yes |
 | D2H prefetch/overlap | Yes | Yes (Phase 6) | Yes |
-| Adaptive buffer sizing | Yes (per size range) | No (fixed 4x4MB) | Phase 7 |
+| Adaptive buffer sizing | Yes (per size range) | Yes (Phase 7) | Yes |
 | InfiniBand Verbs | Yes (97.7% wire) | No | Phase 9 |
 | GPUDirect RDMA | Yes | No | Phase 13 |
 | Transfer compression | Yes (2022) | No | Phase 10 |

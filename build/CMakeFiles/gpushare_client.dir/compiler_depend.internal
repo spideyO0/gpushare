@@ -158,6 +158,11 @@ CMakeFiles/gpushare_client.dir/client/gpushare_client.cpp.o
  /usr/include/bits/libc-header-start.h
  /usr/include/bits/locale.h
  /usr/include/bits/long-double.h
+ /usr/include/bits/mman-linux.h
+ /usr/include/bits/mman-map-flags-generic.h
+ /usr/include/bits/mman-shared.h
+ /usr/include/bits/mman.h
+ /usr/include/bits/mman_ext.h
  /usr/include/bits/netdb.h
  /usr/include/bits/posix_opt.h
  /usr/include/bits/pthread_stack_min-dynamic.h
@@ -400,6 +405,7 @@ CMakeFiles/gpushare_client.dir/client/gpushare_client.cpp.o
  /usr/include/string.h
  /usr/include/strings.h
  /usr/include/sys/cdefs.h
+ /usr/include/sys/mman.h
  /usr/include/sys/select.h
  /usr/include/sys/single_threaded.h
  /usr/include/sys/socket.h

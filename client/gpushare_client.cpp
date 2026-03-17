@@ -299,69 +299,93 @@ static void init_local_gpu() {
 static void init_local_gpu() { /* Not yet implemented on Windows */ }
 #endif
 
-/* ── Phase 5: Client-side pinned buffer pool ─────────────── */
-/* Completes rCUDA's three-stage pipeline: app memory -> client pinned buffer
- * -> network -> server pinned buffer -> GPU. Page-locked memory allows the
- * OS to DMA directly from the buffer to the NIC, bypassing the kernel's
- * pageable staging copy. Can't use cudaMallocHost (no CUDA on client). */
-#define CLIENT_PINNED_COUNT  4
-#define CLIENT_PINNED_SIZE   (4 * 1024 * 1024)  /* 4 MB each */
+/* ── Phase 5+7: Client-side tiered pinned buffer pool ────── */
+/* Three-stage pipeline: app memory -> client pinned buffer -> network ->
+ * server pinned buffer -> GPU. Uses mlock/VirtualLock (no CUDA on client).
+ * Phase 7 adds tiered sizing so small transfers don't waste 4MB slots. */
 
-struct ClientPinnedPool {
-    void *buffers[CLIENT_PINNED_COUNT] = {};
-    bool  in_use[CLIENT_PINNED_COUNT]  = {};
-    bool  is_locked[CLIENT_PINNED_COUNT] = {};
-    std::mutex mtx;
-    bool initialized = false;
+struct ClientPinnedTier {
+    static constexpr int MAX_BUFS = 8;
+    void *buffers[MAX_BUFS] = {};
+    bool  in_use[MAX_BUFS]  = {};
+    bool  is_locked[MAX_BUFS] = {};
+    int   count = 0;
+    size_t buf_size = 0;
 
-    void init() {
-        for (int i = 0; i < CLIENT_PINNED_COUNT; i++) {
+    void init(int n, size_t sz) {
+        count = std::min(n, (int)MAX_BUFS);
+        buf_size = sz;
+        for (int i = 0; i < count; i++) {
 #ifdef _WIN32
-            buffers[i] = VirtualAlloc(NULL, CLIENT_PINNED_SIZE,
+            buffers[i] = VirtualAlloc(NULL, buf_size,
                                        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
             if (buffers[i]) {
-                is_locked[i] = (VirtualLock(buffers[i], CLIENT_PINNED_SIZE) != 0);
+                is_locked[i] = (VirtualLock(buffers[i], buf_size) != 0);
             }
 #else
-            buffers[i] = mmap(NULL, CLIENT_PINNED_SIZE, PROT_READ | PROT_WRITE,
+            buffers[i] = mmap(NULL, buf_size, PROT_READ | PROT_WRITE,
                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
             if (buffers[i] == MAP_FAILED) {
                 buffers[i] = nullptr;
             } else {
-                is_locked[i] = (mlock(buffers[i], CLIENT_PINNED_SIZE) == 0);
+                is_locked[i] = (mlock(buffers[i], buf_size) == 0);
             }
 #endif
             if (!buffers[i]) {
-                buffers[i] = malloc(CLIENT_PINNED_SIZE);
+                buffers[i] = malloc(buf_size);
                 is_locked[i] = false;
             }
+        }
+    }
+
+    void destroy() {
+        for (int i = 0; i < count; i++) {
+            if (!buffers[i]) continue;
+#ifdef _WIN32
+            if (is_locked[i]) VirtualUnlock(buffers[i], buf_size);
+            VirtualFree(buffers[i], 0, MEM_RELEASE);
+#else
+            if (is_locked[i]) munlock(buffers[i], buf_size);
+            munmap(buffers[i], buf_size);
+#endif
+            buffers[i] = nullptr;
+        }
+    }
+};
+
+struct ClientPinnedPool {
+    static constexpr int NUM_TIERS = 3;
+    ClientPinnedTier tiers[NUM_TIERS];
+    std::mutex mtx;
+    bool initialized = false;
+
+    /* Tier config: {count, size} */
+    static constexpr int    tier_counts[] = {8, 4, 4};
+    static constexpr size_t tier_sizes[]  = {64*1024, 1*1024*1024, 4*1024*1024};
+
+    void init() {
+        for (int t = 0; t < NUM_TIERS; t++) {
+            tiers[t].init(tier_counts[t], tier_sizes[t]);
         }
         initialized = true;
     }
 
     void destroy() {
-        for (int i = 0; i < CLIENT_PINNED_COUNT; i++) {
-            if (!buffers[i]) continue;
-#ifdef _WIN32
-            if (is_locked[i]) VirtualUnlock(buffers[i], CLIENT_PINNED_SIZE);
-            VirtualFree(buffers[i], 0, MEM_RELEASE);
-#else
-            if (is_locked[i]) munlock(buffers[i], CLIENT_PINNED_SIZE);
-            munmap(buffers[i], CLIENT_PINNED_SIZE);
-#endif
-            buffers[i] = nullptr;
-        }
+        for (int t = 0; t < NUM_TIERS; t++) tiers[t].destroy();
         initialized = false;
     }
 
+    /* Acquire a buffer >= size. index encodes tier + slot. */
     void *acquire(size_t size, int &index) {
         std::lock_guard<std::mutex> lock(mtx);
-        if (size <= CLIENT_PINNED_SIZE) {
-            for (int i = 0; i < CLIENT_PINNED_COUNT; i++) {
-                if (!in_use[i] && buffers[i]) {
-                    in_use[i] = true;
-                    index = i;
-                    return buffers[i];
+        for (int t = 0; t < NUM_TIERS; t++) {
+            if (size <= tiers[t].buf_size) {
+                for (int i = 0; i < tiers[t].count; i++) {
+                    if (!tiers[t].in_use[i] && tiers[t].buffers[i]) {
+                        tiers[t].in_use[i] = true;
+                        index = t * ClientPinnedTier::MAX_BUFS + i;
+                        return tiers[t].buffers[i];
+                    }
                 }
             }
         }
@@ -370,14 +394,21 @@ struct ClientPinnedPool {
     }
 
     void release(void *buf, int index) {
-        if (index >= 0 && index < CLIENT_PINNED_COUNT) {
-            std::lock_guard<std::mutex> lock(mtx);
-            in_use[index] = false;
-        } else {
-            free(buf);
+        if (index >= 0) {
+            int t = index / ClientPinnedTier::MAX_BUFS;
+            int i = index % ClientPinnedTier::MAX_BUFS;
+            if (t < NUM_TIERS && i < tiers[t].count) {
+                std::lock_guard<std::mutex> lock(mtx);
+                tiers[t].in_use[i] = false;
+                return;
+            }
         }
+        free(buf);
     }
 };
+
+constexpr int    ClientPinnedPool::tier_counts[];
+constexpr size_t ClientPinnedPool::tier_sizes[];
 
 static ClientPinnedPool g_client_pinned;
 static bool g_client_pinned_initialized = false;

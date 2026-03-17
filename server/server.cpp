@@ -123,71 +123,113 @@ static NetType classify_client(const struct sockaddr_storage *client_addr) {
 }
 
 /* ── Pinned buffer pool ──────────────────────────────────── */
-/* Phase 1: Pinned (page-locked) host memory for faster DMA transfers.
- * cudaMallocHost memory allows the GPU to use DMA directly, bypassing
- * an extra copy through a pageable staging buffer. */
-#define PINNED_BUF_COUNT 4
-#define PINNED_BUF_SIZE  (4 * 1024 * 1024)  /* 4 MB each */
+/* ── Phase 7: Tiered pinned buffer pool ──────────────────── */
+/* rCUDA adapts buffer count and size based on transfer size ranges.
+ * Three tiers avoid wasting a 4MB slot on a 1KB control message,
+ * and avoid malloc fallback for very large transfers that need
+ * multiple pinned buffers simultaneously. */
 
-struct PinnedBufferPool {
-    void *buffers[PINNED_BUF_COUNT] = {};
-    bool  in_use[PINNED_BUF_COUNT]  = {};
-    bool  is_pinned[PINNED_BUF_COUNT] = {};
-    std::mutex mtx;
-    bool initialized = false;
+#define PINNED_BUF_SIZE  (4 * 1024 * 1024)  /* kept for compat (Phase 6 prefetch) */
 
-    void init() {
-        for (int i = 0; i < PINNED_BUF_COUNT; i++) {
-            cudaError_t err = cudaMallocHost(&buffers[i], PINNED_BUF_SIZE);
+struct PinnedTier {
+    static constexpr int MAX_BUFS = 8;
+    void *buffers[MAX_BUFS] = {};
+    bool  in_use[MAX_BUFS]  = {};
+    bool  is_pinned[MAX_BUFS] = {};
+    int   count = 0;
+    size_t buf_size = 0;
+
+    void init(int n, size_t sz) {
+        count = std::min(n, (int)MAX_BUFS);
+        buf_size = sz;
+        for (int i = 0; i < count; i++) {
+            cudaError_t err = cudaMallocHost(&buffers[i], buf_size);
             is_pinned[i] = (err == cudaSuccess);
             if (!is_pinned[i]) {
-                LOG_WARN("cudaMallocHost failed for pinned buffer %d, using malloc fallback", i);
-                buffers[i] = malloc(PINNED_BUF_SIZE);
+                buffers[i] = malloc(buf_size);
             }
         }
-        initialized = true;
-        LOG_DBG("Pinned buffer pool: %d x %d MB allocated", PINNED_BUF_COUNT,
-                PINNED_BUF_SIZE / (1024 * 1024));
     }
 
     void destroy() {
-        for (int i = 0; i < PINNED_BUF_COUNT; i++) {
+        for (int i = 0; i < count; i++) {
             if (buffers[i]) {
                 if (is_pinned[i]) cudaFreeHost(buffers[i]);
                 else free(buffers[i]);
                 buffers[i] = nullptr;
             }
         }
+    }
+};
+
+struct PinnedBufferPool {
+    /* Tier 0: small (64KB x 8) — control messages, small memcpy, kernel args */
+    /* Tier 1: medium (1MB x 4) — moderate transfers */
+    /* Tier 2: large (4MB x 4)  — chunk-sized transfers, bulk data */
+    static constexpr int NUM_TIERS = 3;
+    PinnedTier tiers[NUM_TIERS];
+    std::mutex mtx;
+    bool initialized = false;
+
+    /* Tier config: {count, size} */
+    static constexpr int    tier_counts[] = {8, 4, 4};
+    static constexpr size_t tier_sizes[]  = {64*1024, 1*1024*1024, 4*1024*1024};
+
+    void init() {
+        for (int t = 0; t < NUM_TIERS; t++) {
+            tiers[t].init(tier_counts[t], tier_sizes[t]);
+        }
+        initialized = true;
+        LOG_DBG("Tiered pinned pool: %dx%luK + %dx%luK + %dx%luK",
+                tier_counts[0], (unsigned long)(tier_sizes[0]/1024),
+                tier_counts[1], (unsigned long)(tier_sizes[1]/1024),
+                tier_counts[2], (unsigned long)(tier_sizes[2]/1024));
+    }
+
+    void destroy() {
+        for (int t = 0; t < NUM_TIERS; t++) tiers[t].destroy();
         initialized = false;
     }
 
-    /* Returns a pinned buffer, or malloc fallback if all busy.
-     * index is set to the pool slot (-1 if fallback). */
+    /* Acquire a buffer >= size. index encodes tier + slot:
+     * index = tier * MAX_BUFS + slot. -1 = malloc fallback. */
     void *acquire(size_t size, int &index) {
         std::lock_guard<std::mutex> lock(mtx);
-        if (size <= PINNED_BUF_SIZE) {
-            for (int i = 0; i < PINNED_BUF_COUNT; i++) {
-                if (!in_use[i] && buffers[i]) {
-                    in_use[i] = true;
-                    index = i;
-                    return buffers[i];
+        /* Find the smallest tier that fits */
+        for (int t = 0; t < NUM_TIERS; t++) {
+            if (size <= tiers[t].buf_size) {
+                for (int i = 0; i < tiers[t].count; i++) {
+                    if (!tiers[t].in_use[i] && tiers[t].buffers[i]) {
+                        tiers[t].in_use[i] = true;
+                        index = t * PinnedTier::MAX_BUFS + i;
+                        return tiers[t].buffers[i];
+                    }
                 }
+                /* This tier is full — try the next larger tier */
             }
         }
-        /* Fallback: pageable allocation */
+        /* All tiers exhausted — fallback to pageable malloc */
         index = -1;
         return malloc(size);
     }
 
     void release(void *buf, int index) {
-        if (index >= 0 && index < PINNED_BUF_COUNT) {
-            std::lock_guard<std::mutex> lock(mtx);
-            in_use[index] = false;
-        } else {
-            free(buf);
+        if (index >= 0) {
+            int t = index / PinnedTier::MAX_BUFS;
+            int i = index % PinnedTier::MAX_BUFS;
+            if (t < NUM_TIERS && i < tiers[t].count) {
+                std::lock_guard<std::mutex> lock(mtx);
+                tiers[t].in_use[i] = false;
+                return;
+            }
         }
+        free(buf);
     }
 };
+
+/* Static constexpr definitions (C++17 inline, but needed for older compilers) */
+constexpr int    PinnedBufferPool::tier_counts[];
+constexpr size_t PinnedBufferPool::tier_sizes[];
 
 /* Phase 2: Track pending async transfers so we can release pinned buffers
  * after the GPU finishes the async copy. */

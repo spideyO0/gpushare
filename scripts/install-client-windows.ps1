@@ -846,7 +846,7 @@ Write-Host ""
 Write-Host "  CUDA override:   " -NoNewline; Write-Host "ACTIVE" -ForegroundColor Green
 Write-Host "                   All GPU apps will use the remote GPU transparently."
 Write-Host "  API coverage:    2600+ functions (cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSOLVER, cuRAND, NVRTC)"
-Write-Host "  Transfer opts:   " -NoNewline; Write-Host "ACTIVE" -ForegroundColor Green -NoNewline; Write-Host " (pinned staging, async memcpy, chunked pipelining, D2H prefetch)"
+Write-Host "  Transfer opts:   " -NoNewline; Write-Host "ACTIVE" -ForegroundColor Green -NoNewline; Write-Host " (tiered pinned pools, async memcpy, chunked pipelining, D2H prefetch)"
 Write-Host "  Task Manager:    " -NoNewline; Write-Host "GPU tab will show remote GPU (after reboot)" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Usage:" -ForegroundColor White
