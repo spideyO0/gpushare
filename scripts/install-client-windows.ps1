@@ -495,63 +495,98 @@ foreach ($dll in $apiDlls) {
 }
 
 # ==============================================================================
-# STEP 4b: Install critical DLLs to System32 for DLL search order priority
+# STEP 4b: Install DLLs into Python directories (DLL search order priority)
 # ==============================================================================
-# Windows DLL search order: app dir -> System32 -> PATH directories.
-# PyTorch loads nvcuda.dll via LoadLibrary which finds System32 before PATH.
-# We MUST place our nvcuda.dll in System32 (after backing up the real one)
-# for transparent interception to work.
-Write-Step "Installing system-level DLL overrides..."
+# Windows DLL search order: (1) app directory -> (2) System32 -> (3) PATH.
+# System32 DLLs (nvcuda.dll, nvml.dll) are locked by the NVIDIA driver and
+# cannot be overwritten. Instead, we copy gpushare DLLs into every Python
+# installation's directory - position #1 in search order beats System32.
+Write-Step "Installing DLLs into Python directories for search order priority..."
 
-$sys32 = "$env:SystemRoot\System32"
-$systemDlls = @("nvcuda.dll", "nvml.dll")
+$criticalDlls = @("nvcuda.dll", "nvml.dll", "cudart64_12.dll", "cudart64_130.dll")
 
-foreach ($dll in $systemDlls) {
-    $sys32Path = Join-Path $sys32 $dll
-    $backupPath = Join-Path $realBackupDir $dll
-    $gpushareDll = Join-Path $InstallDir $dll
+# Find all Python installations
+$pythonDirs = @()
+# Current Python in PATH
+$pyCmd = Get-Command python -ErrorAction SilentlyContinue
+if ($pyCmd) { $pythonDirs += Split-Path $pyCmd.Source }
+$py3Cmd = Get-Command python3 -ErrorAction SilentlyContinue
+if ($py3Cmd) { $pythonDirs += Split-Path $py3Cmd.Source }
+# Common Python install locations
+$pythonDirs += Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+$pythonDirs += Get-ChildItem "C:\Python*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+# Deduplicate
+$pythonDirs = $pythonDirs | Sort-Object -Unique | Where-Object { Test-Path $_ }
 
-    # Backup the real DLL if not already backed up
-    if ((Test-Path $sys32Path) -and (-not (Test-Path $backupPath))) {
-        # Verify it is not already our DLL (check file size difference)
-        $realSize = (Get-Item $sys32Path).Length
-        $ourSize = (Get-Item $gpushareDll -ErrorAction SilentlyContinue).Length
-        if ($realSize -ne $ourSize) {
-            Copy-Item -Force $sys32Path $backupPath
-            Write-Ok "Backed up real $dll from System32"
+if ($pythonDirs.Count -eq 0) {
+    Write-Warn "No Python installations found - DLL override limited to PATH priority"
+} else {
+    foreach ($pyDir in $pythonDirs) {
+        $count = 0
+        foreach ($dll in $criticalDlls) {
+            $srcDll = Join-Path $InstallDir $dll
+            $dstDll = Join-Path $pyDir $dll
+            if (-not (Test-Path $srcDll)) { continue }
+
+            # Backup the real DLL if one exists in this Python dir
+            if (Test-Path $dstDll) {
+                $backupPath = Join-Path $realBackupDir "python_$dll"
+                $realSize = (Get-Item $dstDll).Length
+                $ourSize = (Get-Item $srcDll).Length
+                if (($realSize -ne $ourSize) -and (-not (Test-Path $backupPath))) {
+                    Copy-Item -Force $dstDll $backupPath
+                }
+            }
+
+            try {
+                Copy-Item -Force $srcDll $dstDll
+                $count++
+            } catch {
+                Write-Warn "Could not copy $dll to $pyDir : $_"
+            }
+        }
+        if ($count -gt 0) {
+            Write-Ok "Installed $count DLLs to $pyDir"
         }
     }
-
-    # Copy gpushare DLL to System32
-    try {
-        Copy-Item -Force $gpushareDll $sys32Path
-        Write-Ok "Installed $dll to System32 (overrides real NVIDIA driver)"
-    } catch {
-        Write-Warn "Could not copy $dll to System32: $_"
-        Write-Info "You may need to close all GPU applications first, or reboot in Safe Mode."
-    }
+    Write-Info "DLLs installed to $($pythonDirs.Count) Python directory(s) for search order priority"
 }
 
-# Also install cudart to System32 for apps that load it from there
-$cudartSys = @("cudart64_12.dll", "cudart64_130.dll")
-foreach ($dll in $cudartSys) {
-    $sys32Path = Join-Path $sys32 $dll
-    $backupPath = Join-Path $realBackupDir $dll
-    $gpushareDll = Join-Path $InstallDir $dll
+# Also try to install into any conda/venv site-packages torch directories
+# PyTorch bundles its own nvcuda.dll in torch\lib\ - we need to override that too
+$torchLibDirs = @()
+foreach ($pyDir in $pythonDirs) {
+    $torchLib = Join-Path $pyDir "Lib\site-packages\torch\lib"
+    if (Test-Path $torchLib) { $torchLibDirs += $torchLib }
+}
+# Also check the current venv
+if ($env:VIRTUAL_ENV) {
+    $venvTorch = Join-Path $env:VIRTUAL_ENV "Lib\site-packages\torch\lib"
+    if (Test-Path $venvTorch) { $torchLibDirs += $venvTorch }
+}
 
-    if ((Test-Path $sys32Path) -and (-not (Test-Path $backupPath))) {
-        $realSize = (Get-Item $sys32Path).Length
-        $ourSize = (Get-Item $gpushareDll -ErrorAction SilentlyContinue).Length
-        if ($realSize -ne $ourSize) {
-            Copy-Item -Force $sys32Path $backupPath
-            Write-Ok "Backed up real $dll from System32"
+foreach ($torchDir in $torchLibDirs) {
+    $count = 0
+    foreach ($dll in $criticalDlls) {
+        $srcDll = Join-Path $InstallDir $dll
+        $dstDll = Join-Path $torchDir $dll
+        if (-not (Test-Path $srcDll)) { continue }
+        # Backup original torch DLL
+        if (Test-Path $dstDll) {
+            $backupPath = Join-Path $realBackupDir "torch_$dll"
+            $realSize = (Get-Item $dstDll).Length
+            $ourSize = (Get-Item $srcDll).Length
+            if (($realSize -ne $ourSize) -and (-not (Test-Path $backupPath))) {
+                Copy-Item -Force $dstDll $backupPath
+            }
         }
+        try {
+            Copy-Item -Force $srcDll $dstDll
+            $count++
+        } catch { }
     }
-    try {
-        Copy-Item -Force $gpushareDll $sys32Path
-        Write-Ok "Installed $dll to System32"
-    } catch {
-        # cudart may not exist in System32 - that is fine, PATH will handle it
+    if ($count -gt 0) {
+        Write-Ok "Installed $count DLLs to $torchDir (PyTorch override)"
     }
 }
 
