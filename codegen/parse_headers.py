@@ -172,6 +172,14 @@ def generate_passthrough_client(all_funcs, outpath):
         "nvmlDeviceGetGraphicsRunningProcesses_v3", "nvmlErrorString",
     }
 
+    # Also skip functions already in generated_stubs.cpp (full-RPC tier-1 stubs)
+    gen_stubs_path = os.path.join(os.path.dirname(outpath), "generated_stubs.cpp")
+    if os.path.isfile(gen_stubs_path):
+        with open(gen_stubs_path, "r") as f:
+            gen_content = f.read()
+        gen_funcs = re.findall(r'GEN_EXPORT\s+int\s+(\w+)\s*\(', gen_content)
+        skip.update(gen_funcs)
+
     total = 0
     for lib_name, funcs in all_funcs.items():
         lines.append(f"/* -- {lib_name}: {len(funcs)} functions -- */")
