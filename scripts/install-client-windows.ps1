@@ -556,35 +556,58 @@ foreach ($pyDir in $pythonDirs) {
     }
 }
 
-if ($HasLocalGpu) {
-    # LOCAL GPU PRESENT: Do NOT override DLLs.
-    # Instead, install a Python startup hook that patches torch.cuda to
-    # include remote GPUs alongside local ones. Zero code changes needed.
-    Write-Info "Local GPU detected - installing Python startup hook for dual-GPU support"
-
-    # Install gpushare_hook.py + gpushare.pth into each Python's site-packages
-    $hookSrc = Join-Path $ProjectDir "python\gpushare_hook.py"
-    $pthSrc = Join-Path $ProjectDir "python\gpushare.pth"
-    if ((Test-Path $hookSrc) -and (Test-Path $pthSrc)) {
-        foreach ($pyDir in $pythonDirs) {
-            $siteDir = Join-Path $pyDir "Lib\site-packages"
-            if (-not (Test-Path $siteDir)) { continue }
-            try {
-                Copy-Item -Force $hookSrc (Join-Path $siteDir "gpushare_hook.py")
-                Copy-Item -Force $pthSrc (Join-Path $siteDir "gpushare.pth")
-                Write-Ok "Installed startup hook to $siteDir"
-            } catch {
-                Write-Warn "Could not install hook to $siteDir : $_"
-            }
+# -- Always install the Python startup hook --
+# The hook patches torch.cuda to:
+#   - Add remote GPU's SM arch to get_arch_list() (prevents PyTorch rejection)
+#   - Neutralize _check_capability / _check_cubins
+#   - Fix is_available(), device_count(), get_device_properties() for remote GPUs
+#   - Handle _lazy_init() failures gracefully
+#   - Enable torch.backends.cudnn for remote GPUs
+# On Windows with a local GPU, the hook also uses a TCP fallback to discover
+# remote GPUs (since nvcuda.dll is the real NVIDIA driver, not ours).
+Write-Info "Installing Python startup hook for PyTorch integration..."
+$hookSrc = Join-Path $ProjectDir "python\gpushare_hook.py"
+$pthSrc  = Join-Path $ProjectDir "python\gpushare.pth"
+$hookInstalled = $false
+if ((Test-Path $hookSrc) -and (Test-Path $pthSrc)) {
+    foreach ($pyDir in $pythonDirs) {
+        # Install to the main site-packages
+        $siteDir = Join-Path $pyDir "Lib\site-packages"
+        if (-not (Test-Path $siteDir)) { continue }
+        try {
+            Copy-Item -Force $hookSrc (Join-Path $siteDir "gpushare_hook.py")
+            Copy-Item -Force $pthSrc  (Join-Path $siteDir "gpushare.pth")
+            Write-Ok "Installed startup hook to $siteDir"
+            $hookInstalled = $true
+        } catch {
+            Write-Warn "Could not install hook to $siteDir : $_"
         }
-    } else {
-        Write-Warn "Hook files not found in $ProjectDir\python - skipping"
+        # Also install to any virtualenvs under common locations
+        $venvDirs = @()
+        $venvDirs += Get-ChildItem (Join-Path $pyDir "Lib\site-packages") -Filter "virtualenv*" -Directory -ErrorAction SilentlyContinue
+        foreach ($venvSite in (Get-ChildItem "$env:USERPROFILE\*\Lib\site-packages" -Directory -ErrorAction SilentlyContinue)) {
+            try {
+                Copy-Item -Force $hookSrc (Join-Path $venvSite.FullName "gpushare_hook.py")
+                Copy-Item -Force $pthSrc  (Join-Path $venvSite.FullName "gpushare.pth")
+            } catch { }
+        }
     }
+    if (-not $hookInstalled) {
+        Write-Warn "No Python site-packages directories found for hook installation"
+    }
+} else {
+    Write-Warn "Hook files not found in $ProjectDir\python - PyTorch integration will be limited"
+}
+
+if ($HasLocalGpu) {
+    # LOCAL GPU PRESENT: Do NOT override DLLs (breaks c10_cuda.dll).
+    # The startup hook handles remote GPU discovery via TCP fallback.
+    Write-Info "Local GPU detected - hook uses TCP fallback for remote GPU discovery"
     Write-Info "Remote GPU will appear as a native CUDA device in PyTorch"
 } else {
     # NO LOCAL GPU: Safe to override DLLs for transparent CUDA interception.
     # Applications load our nvcuda.dll/cudart64_*.dll and all GPU calls
-    # are forwarded to the remote server.
+    # are forwarded to the remote server. Hook still needed for PyTorch SM checks.
     Write-Info "No local GPU - installing transparent CUDA DLL overrides..."
     $overrideDlls = @("nvcuda.dll", "nvml.dll", "cudart64_12.dll", "cudart64_130.dll")
     foreach ($pyDir in $pythonDirs) {

@@ -1,87 +1,92 @@
-#!/usr/bin/env python3
-"""
-Test script for gpushare Python client.
-Run the server first, then: python test_python.py [server_host]
-"""
-
-import sys
-import os
+import torch
 import time
-import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
-import gpushare
+def list_gpus():
+    if not torch.cuda.is_available():
+        print("❌ CUDA is not available on this system.")
+        return []
+
+    gpu_count = torch.cuda.device_count()
+    gpus = []
+
+    print("\nAvailable GPUs:")
+    for i in range(gpu_count):
+        name = torch.cuda.get_device_name(i)
+        total_mem = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+        print(f"[{i}] {name} ({total_mem:.2f} GB)")
+        gpus.append(i)
+
+    return gpus
+
+
+def select_gpu(gpus):
+    while True:
+        try:
+            choice = int(input("\nSelect GPU ID to stress test: "))
+            if choice in gpus:
+                return choice
+            else:
+                print("Invalid GPU ID.")
+        except ValueError:
+            print("Enter a valid number.")
+
+
+def allocate_memory(device, target_gb=5):
+    print(f"\nAllocating ~{target_gb} GB GPU memory...")
+
+    bytes_per_float = 4  # float32
+    target_bytes = target_gb * 1024**3
+    num_elements = target_bytes // bytes_per_float
+
+    tensor = torch.empty(int(num_elements), dtype=torch.float32, device=device)
+    print("✅ Memory allocated successfully.")
+    return tensor
+
+
+def stress_test(device, duration_sec=60):
+    print(f"\n🔥 Running stress test on {device} for {duration_sec} seconds...")
+
+    size = 4096  # large matrix for heavy load
+    a = torch.randn(size, size, device=device)
+    b = torch.randn(size, size, device=device)
+
+    torch.cuda.synchronize()
+    start_time = time.time()
+
+    iterations = 0
+
+    while time.time() - start_time < duration_sec:
+        c = torch.matmul(a, b)
+        torch.cuda.synchronize()
+        iterations += 1
+
+    print(f"\n✅ Stress test completed.")
+    print(f"Total iterations: {iterations}")
+    print(f"Average iterations/sec: {iterations / duration_sec:.2f}")
 
 
 def main():
-    host = sys.argv[1] if len(sys.argv) > 1 else "localhost"
-    print(f"Connecting to gpushare server at {host}...")
+    gpus = list_gpus()
+    if not gpus:
+        return
 
-    with gpushare.connect(host) as gpu:
-        # Test 1: Ping
-        assert gpu.ping(), "Ping failed"
-        print("[PASS] Ping")
+    gpu_id = select_gpu(gpus)
+    device = torch.device(f"cuda:{gpu_id}")
+    torch.cuda.set_device(device)
 
-        # Test 2: Device info
-        print(f"\n{gpu.info()}\n")
-        print(f"[PASS] Device query")
+    print(f"\nUsing GPU: {torch.cuda.get_device_name(device)}")
 
-        # Test 3: Memory alloc + transfer
-        N = 1024 * 1024  # 1M floats = 4 MB
-        data = np.random.randn(N).astype(np.float32)
+    # Allocate memory
+    mem_tensor = allocate_memory(device, target_gb=5)
 
-        d_ptr = gpu.malloc(data.nbytes)
-        print(f"[PASS] Allocated {data.nbytes / 1024:.0f} KB on GPU")
+    # Run stress test
+    stress_test(device, duration_sec=60)
 
-        # H2D transfer with timing
-        t0 = time.perf_counter()
-        gpu.memcpy_h2d(d_ptr, data)
-        t_h2d = time.perf_counter() - t0
-        bw_h2d = data.nbytes / t_h2d / 1e6
-        print(f"[PASS] H2D: {t_h2d*1000:.1f} ms ({bw_h2d:.0f} MB/s)")
+    # Keep memory allocated for a bit (optional)
+    input("\nPress Enter to release GPU memory and exit...")
 
-        # D2H transfer with timing
-        result = np.empty_like(data)
-        t0 = time.perf_counter()
-        gpu.memcpy_d2h(result, d_ptr, data.nbytes)
-        t_d2h = time.perf_counter() - t0
-        bw_d2h = data.nbytes / t_d2h / 1e6
-        print(f"[PASS] D2H: {t_d2h*1000:.1f} ms ({bw_d2h:.0f} MB/s)")
-
-        # Verify
-        assert np.allclose(data, result), "Data mismatch!"
-        print(f"[PASS] Round-trip verified ({N} floats)")
-
-        # Test 4: D2D copy
-        d_ptr2 = gpu.malloc(data.nbytes)
-        gpu.memcpy_d2d(d_ptr2, d_ptr, data.nbytes)
-        result2 = np.empty_like(data)
-        gpu.memcpy_d2h(result2, d_ptr2, data.nbytes)
-        assert np.allclose(data, result2), "D2D mismatch!"
-        print(f"[PASS] D2D copy verified")
-
-        # Test 5: Large transfer benchmark
-        sizes = [1024, 64*1024, 1024*1024, 16*1024*1024]
-        print(f"\n--- Bandwidth benchmark ---")
-        for size in sizes:
-            buf = np.random.randn(size // 4).astype(np.float32)
-            d = gpu.malloc(size)
-
-            t0 = time.perf_counter()
-            for _ in range(3):
-                gpu.memcpy_h2d(d, buf)
-            t = (time.perf_counter() - t0) / 3
-            bw = size / t / 1e6
-
-            gpu.free(d)
-            print(f"  {size/1024:>8.0f} KB: {bw:>7.1f} MB/s  ({t*1000:.1f} ms)")
-
-        # Cleanup
-        gpu.free(d_ptr)
-        gpu.free(d_ptr2)
-        gpu.synchronize()
-
-    print(f"\n=== All Python tests passed ===")
+    del mem_tensor
+    torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

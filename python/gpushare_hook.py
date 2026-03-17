@@ -5,31 +5,33 @@ Loaded at Python startup via gpushare.pth in site-packages.
 Makes remote GPUs transparently available to PyTorch by:
 
 1. Querying GPUs via ctypes to our C library (libcuda.so.1 / nvcuda.dll)
-2. Patching PyTorch's SM compatibility checks that reject unknown architectures
-3. Providing device property fallbacks when C-level queries fail
+2. If ctypes finds no remote GPUs, falls back to a lightweight Python TCP
+   connection to the gpushare server (essential on Windows with local GPU,
+   and on the server machine itself)
+3. Patching PyTorch's SM compatibility checks that reject unknown architectures
+4. Providing device property fallbacks when C-level queries fail
 
-All actual CUDA operations (malloc, memcpy, kernel launch) go through the
-C library. This hook ONLY fixes Python-level compatibility gates.
-
-No separate network connection is created.
+Actual CUDA operations go through the C library at runtime.
 """
 
 import os
 import sys
 import ctypes
 import ctypes.util
+import struct
+import socket
 import threading
 import builtins
 
 _patched = False
 _lock = threading.Lock()
-_devices = []       # [{name, major, minor, total_mem, sm_count, ...}, ...]
+_devices = []       # [{name, major, minor, total_mem, sm_count, is_remote, ...}]
 _device_count = 0
 _libcuda = None
 
 
 # ════════════════════════════════════════════════════════════
-#  ctypes layer — talk to our C library, not a TCP connection
+#  Phase 1: ctypes discovery (fast, no network overhead)
 # ════════════════════════════════════════════════════════════
 
 def _load_cuda_lib():
@@ -54,6 +56,20 @@ def _load_cuda_lib():
         except OSError:
             continue
 
+    # Also try gpushare-specific paths on Windows
+    if sys.platform == 'win32':
+        for extra in [
+            os.path.join(os.environ.get('ProgramFiles', r'C:\Program Files'), 'gpushare', 'nvcuda.dll'),
+            os.path.join(os.environ.get('ProgramFiles', r'C:\Program Files'), 'gpushare', 'gpushare_client.dll'),
+            os.path.join(sys.prefix, 'nvcuda.dll'),
+        ]:
+            if os.path.isfile(extra):
+                try:
+                    _libcuda = ctypes.CDLL(extra)
+                    return _libcuda
+                except OSError:
+                    continue
+
     path = ctypes.util.find_library('cuda')
     if path:
         try:
@@ -64,7 +80,7 @@ def _load_cuda_lib():
     return None
 
 
-def _query_devices():
+def _query_devices_ctypes():
     """Discover GPUs via ctypes calls to the loaded CUDA library."""
     global _devices, _device_count
 
@@ -111,7 +127,6 @@ def _query_devices():
         try:
             lib.cuDeviceComputeCapability(ctypes.byref(major), ctypes.byref(minor), dev)
         except AttributeError:
-            # Fallback via cuDeviceGetAttribute
             try:
                 lib.cuDeviceGetAttribute(ctypes.byref(major), ctypes.c_int(75), dev)
                 lib.cuDeviceGetAttribute(ctypes.byref(minor), ctypes.c_int(76), dev)
@@ -145,6 +160,164 @@ def _query_devices():
             'sm_count': sm_count.value,
             'is_remote': '(remote)' in raw_name,
         })
+
+
+# ════════════════════════════════════════════════════════════
+#  Phase 2: Python TCP fallback for remote GPU discovery
+#  Used when ctypes loaded the real NVIDIA driver (not ours)
+#  or when no CUDA library is available at all.
+# ════════════════════════════════════════════════════════════
+
+_MAGIC = 0x47505553
+_HEADER_SIZE = 16
+_OP_INIT = 0x0001
+_OP_CLOSE = 0x0002
+_OP_GET_DEVICE_COUNT = 0x0010
+_OP_GET_DEVICE_PROPS = 0x0011
+
+
+def _read_server_config():
+    """Read gpushare server address from config files."""
+    # Environment variable first
+    env = os.environ.get('GPUSHARE_SERVER')
+    if env:
+        return env
+
+    import platform as _plat
+    candidates = []
+    home = os.path.expanduser("~")
+    if _plat.system() == "Windows":
+        appdata = os.environ.get("LOCALAPPDATA", "")
+        if appdata:
+            candidates.append(os.path.join(appdata, "gpushare", "client.conf"))
+        candidates.append(r"C:\ProgramData\gpushare\client.conf")
+    candidates.append(os.path.join(home, ".config", "gpushare", "client.conf"))
+    candidates.append("/etc/gpushare/client.conf")
+
+    for path in candidates:
+        try:
+            if not os.path.isfile(path):
+                continue
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("server="):
+                        addr = line[7:].strip()
+                        if addr:
+                            return addr
+        except Exception:
+            pass
+    return None
+
+
+def _query_remote_gpus_tcp():
+    """Connect to gpushare server via Python TCP and query remote GPUs.
+
+    This is the fallback path for:
+    - Windows with a local GPU (nvcuda.dll is the real NVIDIA driver)
+    - Server machine (libcuda.so.1 is the real driver)
+    - Any system where ctypes can't load the CUDA library
+    """
+    global _devices, _device_count
+
+    server_addr = _read_server_config()
+    if not server_addr:
+        return
+
+    # Parse host:port
+    host, port = server_addr, 9847
+    if ':' in server_addr:
+        parts = server_addr.rsplit(':', 1)
+        host = parts[0]
+        try:
+            port = int(parts[1])
+        except ValueError:
+            pass
+
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(3.0)  # quick timeout — don't block startup
+        sock.connect((host, port))
+
+        def _send_all(data):
+            mv = memoryview(data)
+            sent = 0
+            while sent < len(data):
+                n = sock.send(mv[sent:])
+                if n == 0:
+                    raise ConnectionError("closed")
+                sent += n
+
+        def _recv_all(size):
+            chunks = []
+            received = 0
+            while received < size:
+                chunk = sock.recv(size - received)
+                if not chunk:
+                    raise ConnectionError("closed")
+                chunks.append(chunk)
+                received += len(chunk)
+            return b"".join(chunks)
+
+        req_id = [1]
+        def _rpc(opcode, payload=b""):
+            rid = req_id[0]
+            req_id[0] += 1
+            total = _HEADER_SIZE + len(payload)
+            header = struct.pack("<IIIHH", _MAGIC, total, rid, opcode, 0)
+            _send_all(header + payload)
+            resp_hdr = _recv_all(_HEADER_SIZE)
+            magic, length, _, _, _ = struct.unpack("<IIIHH", resp_hdr)
+            if magic != _MAGIC:
+                raise ValueError("bad magic")
+            plen = length - _HEADER_SIZE
+            return _recv_all(plen) if plen > 0 else b""
+
+        # INIT handshake
+        _rpc(_OP_INIT, struct.pack("<II", 1, 1))
+
+        # GET_DEVICE_COUNT
+        resp = _rpc(_OP_GET_DEVICE_COUNT)
+        remote_count = struct.unpack("<i", resp[:4])[0]
+        if remote_count <= 0:
+            return
+
+        # GET_DEVICE_PROPS for each remote device
+        for i in range(remote_count):
+            resp = _rpc(_OP_GET_DEVICE_PROPS, struct.pack("<i", i))
+            if len(resp) < 256 + 96:
+                continue
+            name = resp[:256].split(b"\x00")[0].decode("utf-8", errors="replace")
+            fmt = "<QQ" + "i" * 14 + "QQQ"
+            vals = struct.unpack_from(fmt, resp, 256)
+
+            _devices.append({
+                'name': name,
+                'raw_name': name + ' (remote)',
+                'major': vals[12],
+                'minor': vals[13],
+                'total_mem': vals[0],
+                'sm_count': vals[14],
+                'is_remote': True,
+            })
+            _device_count += 1
+
+        # CLOSE
+        try:
+            close_hdr = struct.pack("<IIIHH", _MAGIC, _HEADER_SIZE, 0, _OP_CLOSE, 0)
+            _send_all(close_hdr)
+        except Exception:
+            pass
+
+    except Exception:
+        pass  # Server unreachable — that's fine, just no remote GPUs
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
 
 
 def _ctypes_mem_info():
@@ -463,11 +636,23 @@ def install():
     if os.environ.get('GPUSHARE_NO_HOOK'):
         return
 
-    # Discover GPUs via ctypes (lightweight, no TCP overhead)
+    # Phase 1: Discover GPUs via ctypes (fast, no network)
     try:
-        _query_devices()
+        _query_devices_ctypes()
     except Exception:
-        return
+        pass
+
+    # Phase 2: If no remote GPUs found via ctypes, try direct TCP to server.
+    # This is essential for:
+    #   - Windows with local GPU (nvcuda.dll is real NVIDIA, not ours)
+    #   - Server machine (libcuda.so.1 is the real driver)
+    #   - Any system where our C library isn't installed as the CUDA driver
+    has_remote = any(d.get('is_remote') for d in _devices)
+    if not has_remote:
+        try:
+            _query_remote_gpus_tcp()
+        except Exception:
+            pass
 
     if _device_count == 0:
         return
