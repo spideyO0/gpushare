@@ -778,7 +778,8 @@ echo -e "  Library:         $LIB_DIR/libgpushare_client.so"
 echo -e "  Config:          $CONF_DIR/client.conf"
 if [[ "$NO_SYMLINKS" == false ]]; then
 echo -e "  CUDA override:   ${GREEN}ACTIVE${NC} (libcudart.so -> gpushare)"
-echo -e "  API coverage:    2565 functions (cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSOLVER, cuRAND, NVRTC, nvJPEG)"
+echo -e "  API coverage:    2600+ functions (cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSOLVER, cuRAND, NVRTC, nvJPEG)"
+echo -e "  Transfer opts:   ${GREEN}ACTIVE${NC} (pinned buffers, async memcpy, chunked pipelining)"
 else
 echo -e "  CUDA override:   ${YELLOW}DISABLED${NC} (use LD_LIBRARY_PATH)"
 fi

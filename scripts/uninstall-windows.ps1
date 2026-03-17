@@ -195,6 +195,28 @@ if ($trayProcs) {
     Write-Info "GPU tray widget process - not running"
 }
 
+# 8b. Processes using gpushare DLLs (the client library has an active recv thread)
+$gpuProcs = @()
+if ($hasInstallDir) {
+    try {
+        $gpuProcs = Get-Process -ErrorAction SilentlyContinue |
+            Where-Object {
+                try {
+                    $_.Modules | Where-Object { $_.FileName -and $_.FileName -match "gpushare" }
+                } catch { $false }
+            } | Where-Object { $_ -ne $null }
+    } catch { }
+}
+if ($gpuProcs.Count -gt 0) {
+    $found = $true
+    $procNames = ($gpuProcs | ForEach-Object { "$($_.Name) (PID $($_.Id))" }) -join ", "
+    Write-Action "WARN" "Processes using gpushare DLLs: $procNames"
+    Write-Info "These processes have active background threads from the gpushare DLL."
+    Write-Info "They should be closed before uninstalling to avoid locked files."
+} else {
+    Write-Info "No processes using gpushare DLLs"
+}
+
 # 9. Config directory
 $hasConfig = Test-Path $ConfigDir
 if ($Purge -and $hasConfig) {
@@ -304,6 +326,26 @@ if ($hasTrayShortcut) {
     }
 }
 
+# 6b. Stop processes using gpushare DLLs (they have active recv threads)
+if ($gpuProcs.Count -gt 0) {
+    Write-Info "Requesting graceful exit from processes using gpushare DLLs..."
+    foreach ($proc in $gpuProcs) {
+        try {
+            # Skip our own process
+            if ($proc.Id -eq $PID) { continue }
+            $proc.CloseMainWindow() | Out-Null
+            if (-not $proc.WaitForExit(3000)) {
+                $proc | Stop-Process -Force -ErrorAction SilentlyContinue
+            }
+            Write-Ok "Stopped $($proc.Name) (PID $($proc.Id))"
+        } catch {
+            Write-Warn "Could not stop $($proc.Name) (PID $($proc.Id)): $_"
+        }
+    }
+    # Brief wait for DLL handles to release
+    Start-Sleep -Milliseconds 500
+}
+
 # 7. Remove from system PATH (was step 5)
 if ($hasPathEntry) {
     try {
@@ -322,7 +364,8 @@ if ($hasInstallDir) {
         Write-Ok "Removed $InstallDir"
     } catch {
         Write-Warn "Could not fully remove $InstallDir - some files may be in use"
-        Write-Info "Try closing all GPU applications and running again, or reboot and retry."
+        Write-Info "The gpushare DLL uses background threads that may hold file locks."
+        Write-Info "Close all GPU applications, wait a moment, then retry. Or reboot and retry."
     }
 }
 

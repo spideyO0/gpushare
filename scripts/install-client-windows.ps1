@@ -650,6 +650,13 @@ $nvidiaBatPath = Join-Path $InstallDir "nvidia-smi.bat"
 $nvidiaBat = "@echo off`r`npython `"$ShareDir\nvidia-smi`" %*"
 Set-Content -Path $nvidiaBatPath -Value $nvidiaBat
 
+# Copy the uninstall script into the install directory for easy access
+$uninstSrc = Join-Path $ProjectDir "scripts\uninstall-windows.ps1"
+if (Test-Path $uninstSrc) {
+    Copy-Item -Force $uninstSrc "$InstallDir\uninstall.ps1"
+    Write-Ok "Uninstall script copied to $InstallDir\uninstall.ps1"
+}
+
 # Unblock all installed files (remove Windows "downloaded from internet" flag)
 Write-Info "Unblocking installed files (removing download security flag)..."
 Get-ChildItem -Path $InstallDir -Recurse | Unblock-File -ErrorAction SilentlyContinue
@@ -838,7 +845,8 @@ foreach ($dll in $apiDlls) {
 Write-Host ""
 Write-Host "  CUDA override:   " -NoNewline; Write-Host "ACTIVE" -ForegroundColor Green
 Write-Host "                   All GPU apps will use the remote GPU transparently."
-Write-Host "  API coverage:    2565 functions (cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSOLVER, cuRAND, NVRTC)"
+Write-Host "  API coverage:    2600+ functions (cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSOLVER, cuRAND, NVRTC)"
+Write-Host "  Transfer opts:   " -NoNewline; Write-Host "ACTIVE" -ForegroundColor Green -NoNewline; Write-Host " (pinned buffers, async memcpy, chunked pipelining)"
 Write-Host "  Task Manager:    " -NoNewline; Write-Host "GPU tab will show remote GPU (after reboot)" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Usage:" -ForegroundColor White
@@ -850,7 +858,7 @@ Write-Host "  To change server:" -ForegroundColor White
 Write-Host "    Edit $ConfigDir\client.conf"
 Write-Host ""
 Write-Host "  To uninstall:" -ForegroundColor White
-Write-Host "    Remove $InstallDir and the gpushare entry from system PATH"
+Write-Host "    PowerShell -ExecutionPolicy Bypass -File $ProjectDir\scripts\uninstall-windows.ps1"
 Write-Host ""
 Write-Host "  NOTE: You may need to restart your terminal or log out/in" -ForegroundColor Yellow
 Write-Host "  for PATH changes to take effect." -ForegroundColor Yellow
