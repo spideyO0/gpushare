@@ -62,6 +62,11 @@ if(BUILD_CLIENT)
         CXX_VISIBILITY_PRESET default
     )
 
+    # On Windows (MinGW), drop the "lib" prefix so the DLL is named gpushare_client.dll
+    if(WIN32)
+        set_target_properties(gpushare_client PROPERTIES PREFIX "")
+    endif()
+
     install(TARGETS gpushare_client LIBRARY DESTINATION lib)
     message(STATUS "Client: ENABLED")
 endif()

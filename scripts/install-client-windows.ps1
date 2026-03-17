@@ -191,7 +191,7 @@ if ($SkipBuild) {
                 if ($vsYear) {
                     $Generator = "Visual Studio $vsMajor $vsYear"
                 } else {
-                    # Unknown version — try Ninja which works with any VS
+                    # Unknown version - try Ninja which works with any VS
                     $Generator = "Ninja"
                 }
                 Write-Ok ("Visual Studio found: " + $vsInstallPath + " (v" + $vsMajor + " / " + $vsYear + ")")
@@ -243,8 +243,11 @@ if ($SkipBuild) {
         $existingDll = $null
         $searchPaths = @(
             (Join-Path $BuildDir "gpushare_client.dll"),
+            (Join-Path $BuildDir "libgpushare_client.dll"),
             (Join-Path $BuildDir "Release\gpushare_client.dll"),
-            (Join-Path $BuildDir "Debug\gpushare_client.dll")
+            (Join-Path $BuildDir "Release\libgpushare_client.dll"),
+            (Join-Path $BuildDir "Debug\gpushare_client.dll"),
+            (Join-Path $BuildDir "Debug\libgpushare_client.dll")
         )
         foreach ($sp in $searchPaths) {
             if ((-not $existingDll) -and (Test-Path $sp)) {
@@ -395,10 +398,14 @@ if ($Compiler -eq "prebuilt" -and $NeedDownload) {
 $clientDll = $null
 $dllSearchPaths = @(
     (Join-Path $BuildDir "gpushare_client.dll"),
+    (Join-Path $BuildDir "libgpushare_client.dll"),
     (Join-Path $BuildDir "Release\gpushare_client.dll"),
+    (Join-Path $BuildDir "Release\libgpushare_client.dll"),
     (Join-Path $BuildDir "Debug\gpushare_client.dll"),
+    (Join-Path $BuildDir "Debug\libgpushare_client.dll"),
     (Join-Path $BuildDir "bin\Release\gpushare_client.dll"),
-    (Join-Path $BuildDir "bin\gpushare_client.dll")
+    (Join-Path $BuildDir "bin\gpushare_client.dll"),
+    (Join-Path $BuildDir "bin\libgpushare_client.dll")
 )
 foreach ($sp in $dllSearchPaths) {
     if ((-not $clientDll) -and (Test-Path $sp)) {
