@@ -495,6 +495,67 @@ foreach ($dll in $apiDlls) {
 }
 
 # ==============================================================================
+# STEP 4b: Install critical DLLs to System32 for DLL search order priority
+# ==============================================================================
+# Windows DLL search order: app dir -> System32 -> PATH directories.
+# PyTorch loads nvcuda.dll via LoadLibrary which finds System32 before PATH.
+# We MUST place our nvcuda.dll in System32 (after backing up the real one)
+# for transparent interception to work.
+Write-Step "Installing system-level DLL overrides..."
+
+$sys32 = "$env:SystemRoot\System32"
+$systemDlls = @("nvcuda.dll", "nvml.dll")
+
+foreach ($dll in $systemDlls) {
+    $sys32Path = Join-Path $sys32 $dll
+    $backupPath = Join-Path $realBackupDir $dll
+    $gpushareDll = Join-Path $InstallDir $dll
+
+    # Backup the real DLL if not already backed up
+    if ((Test-Path $sys32Path) -and (-not (Test-Path $backupPath))) {
+        # Verify it is not already our DLL (check file size difference)
+        $realSize = (Get-Item $sys32Path).Length
+        $ourSize = (Get-Item $gpushareDll -ErrorAction SilentlyContinue).Length
+        if ($realSize -ne $ourSize) {
+            Copy-Item -Force $sys32Path $backupPath
+            Write-Ok "Backed up real $dll from System32"
+        }
+    }
+
+    # Copy gpushare DLL to System32
+    try {
+        Copy-Item -Force $gpushareDll $sys32Path
+        Write-Ok "Installed $dll to System32 (overrides real NVIDIA driver)"
+    } catch {
+        Write-Warn "Could not copy $dll to System32: $_"
+        Write-Info "You may need to close all GPU applications first, or reboot in Safe Mode."
+    }
+}
+
+# Also install cudart to System32 for apps that load it from there
+$cudartSys = @("cudart64_12.dll", "cudart64_130.dll")
+foreach ($dll in $cudartSys) {
+    $sys32Path = Join-Path $sys32 $dll
+    $backupPath = Join-Path $realBackupDir $dll
+    $gpushareDll = Join-Path $InstallDir $dll
+
+    if ((Test-Path $sys32Path) -and (-not (Test-Path $backupPath))) {
+        $realSize = (Get-Item $sys32Path).Length
+        $ourSize = (Get-Item $gpushareDll -ErrorAction SilentlyContinue).Length
+        if ($realSize -ne $ourSize) {
+            Copy-Item -Force $sys32Path $backupPath
+            Write-Ok "Backed up real $dll from System32"
+        }
+    }
+    try {
+        Copy-Item -Force $gpushareDll $sys32Path
+        Write-Ok "Installed $dll to System32"
+    } catch {
+        # cudart may not exist in System32 - that is fine, PATH will handle it
+    }
+}
+
+# ==============================================================================
 # STEP 5: Configure system PATH
 # ==============================================================================
 Write-Step "Configuring system PATH..."

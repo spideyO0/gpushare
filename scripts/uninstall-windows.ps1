@@ -134,6 +134,34 @@ if ($hasInstallDir) {
     Write-Info "$InstallDir - not found"
 }
 
+# 3b. System32 DLL overrides (gpushare replaces nvcuda.dll, nvml.dll in System32)
+$sys32 = "$env:SystemRoot\System32"
+$sys32Dlls = @()
+$realBackupDir = Join-Path $InstallDir "real"
+foreach ($dll in @("nvcuda.dll", "nvml.dll", "cudart64_12.dll", "cudart64_130.dll")) {
+    $sys32Path = Join-Path $sys32 $dll
+    $backupPath = Join-Path $realBackupDir $dll
+    if ((Test-Path $sys32Path) -and (Test-Path $backupPath)) {
+        # Check if the System32 DLL is our override (same size as our gpushare_client.dll)
+        $ourDll = Join-Path $InstallDir "gpushare_client.dll"
+        if (Test-Path $ourDll) {
+            $sysSize = (Get-Item $sys32Path).Length
+            $ourSize = (Get-Item $ourDll).Length
+            if ($sysSize -eq $ourSize) {
+                $sys32Dlls += @{ Name = $dll; Sys32 = $sys32Path; Backup = $backupPath }
+                $found = $true
+            }
+        }
+    }
+}
+if ($sys32Dlls.Count -gt 0) {
+    foreach ($entry in $sys32Dlls) {
+        Write-Action "RESTORE" "System32\$($entry.Name) (restore real NVIDIA DLL from backup)"
+    }
+} else {
+    Write-Info "System32 DLL overrides - not found"
+}
+
 # 4. System PATH entry
 $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
 $hasPathEntry = ($machinePath -split ";" | Where-Object { $_ -eq $InstallDir }).Count -gt 0
@@ -354,6 +382,17 @@ if ($hasPathEntry) {
         Write-Ok "Removed from system PATH"
     } catch {
         Write-Warn "Could not update PATH: $_"
+    }
+}
+
+# 7b. Restore real NVIDIA DLLs in System32 from backup
+foreach ($entry in $sys32Dlls) {
+    try {
+        Copy-Item -Force $entry.Backup $entry.Sys32
+        Write-Ok "Restored real $($entry.Name) to System32"
+    } catch {
+        Write-Warn "Could not restore $($entry.Name) to System32: $_"
+        Write-Info "Manually copy $($entry.Backup) to $($entry.Sys32)"
     }
 }
 
