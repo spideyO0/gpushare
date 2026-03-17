@@ -188,6 +188,81 @@ def _hook_torch():
 
         torch.cuda.get_device_name = patched_get_device_name
 
+    # --- Patch set_device ---
+    _orig_set_device = torch.cuda.set_device
+
+    # Track which device the user selected (local or remote)
+    _active = {'device': 0, 'is_remote': False}
+
+    def _resolve_device(device):
+        """Convert device arg to integer index."""
+        if device is None:
+            return _active['device']
+        if isinstance(device, int):
+            return device
+        if isinstance(device, torch.device):
+            return device.index if device.index is not None else 0
+        if hasattr(device, 'index'):
+            return device.index
+        if isinstance(device, str):
+            # "cuda:1" -> 1
+            if device.startswith('cuda:'):
+                return int(device.split(':')[1])
+            if device == 'cuda':
+                return _active['device']
+        return 0
+
+    def patched_set_device(device):
+        idx = _resolve_device(device)
+        _active['device'] = idx
+        if _is_remote_device(idx):
+            _active['is_remote'] = True
+            # Don't call the real set_device - there is no local device N
+        else:
+            _active['is_remote'] = False
+            _orig_set_device(idx)
+    torch.cuda.set_device = patched_set_device
+
+    # --- Patch current_device ---
+    def patched_current_device():
+        return _active['device']
+    torch.cuda.current_device = patched_current_device
+
+    # --- Patch memory_allocated ---
+    if hasattr(torch.cuda, 'memory_allocated'):
+        _orig_memory_allocated = torch.cuda.memory_allocated
+        def patched_memory_allocated(device=None):
+            idx = _resolve_device(device)
+            if _is_remote_device(idx):
+                return 0  # remote memory tracking not available at this level
+            return _orig_memory_allocated(idx)
+        torch.cuda.memory_allocated = patched_memory_allocated
+
+    # --- Patch mem_get_info ---
+    if hasattr(torch.cuda, 'mem_get_info'):
+        _orig_mem_get_info = torch.cuda.mem_get_info
+        def patched_mem_get_info(device=None):
+            idx = _resolve_device(device)
+            if _is_remote_device(idx):
+                ridx = _remote_device_idx(idx)
+                rp = _remote_props.get(ridx, {})
+                total = rp.get('total_global_mem', 0)
+                return (total, total)  # (free, total) - approximate
+            return _orig_mem_get_info(idx)
+        torch.cuda.mem_get_info = patched_mem_get_info
+
+    # --- Suppress SM compatibility warning for remote GPUs ---
+    # PyTorch warns about sm_120 not being supported, but we handle remote
+    # execution on the server side where the correct CUDA version is installed.
+    import warnings
+    _orig_warn = warnings.warn
+    def _filtered_warn(message, *args, **kwargs):
+        msg_str = str(message)
+        if 'sm_120' in msg_str or 'is not compatible with the current PyTorch' in msg_str:
+            return  # suppress this specific warning
+        return _orig_warn(message, *args, **kwargs)
+    warnings.warn = _filtered_warn
+
     sys.stderr.write(f"[gpushare] Hook active: {_local_count} local + {_remote_count} remote GPU(s)\n")
 
 

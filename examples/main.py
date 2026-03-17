@@ -48,9 +48,7 @@ while True:
         print("Please enter a valid integer.")
 
 # ── Set Device ────────────────────────────────────────────
-device = torch.device(f"cuda:{selected}")
-torch.cuda.set_device(device)
-
+torch.cuda.set_device(selected)
 props = torch.cuda.get_device_properties(selected)
 print()
 print(f"Selected        : cuda:{selected} -- {props.name}")
@@ -58,12 +56,50 @@ print(f"   VRAM Total     : {props.total_memory / 1024**3:.2f} GB")
 print()
 
 # ── Generate Image on Selected GPU ───────────────────────
-print("Generating 512x512 image on selected GPU...")
-noise_image = torch.rand(1, 3, 512, 512, device=device)
+# Check if this is a remote device (device index >= local count)
+# For remote devices, gpushare handles the GPU operations via its Python API
+try:
+    local_count = len([i for i in range(torch.cuda.device_count())
+                       if i < selected or not hasattr(torch.cuda.get_device_properties(i), '_gpushare_remote')])
+except Exception:
+    local_count = torch.cuda.device_count()
 
-output_file = f"generated_gpu{selected}.png"
-save_image(noise_image, output_file)
+is_remote = False
+try:
+    import gpushare_hook
+    is_remote = gpushare_hook._is_remote_device(selected)
+except Exception:
+    pass
 
-print(f"Tensor Device     : {noise_image.device}")
-print(f"Memory Used       : {torch.cuda.memory_allocated(selected) / 1024**2:.2f} MB")
-print(f"Image saved       : {output_file}")
+if is_remote:
+    print("Generating 512x512 image on REMOTE GPU (via gpushare)...")
+    import numpy as np
+    import gpushare
+    gpu = gpushare.connect()
+
+    # Create random data, send to remote GPU, get it back
+    host_data = np.random.rand(1, 3, 512, 512).astype(np.float32)
+    size = host_data.nbytes
+    dev_ptr = gpu.malloc(size)
+    gpu.memcpy_h2d(dev_ptr, host_data.tobytes())
+    result = np.empty_like(host_data)
+    gpu.memcpy_d2h(result, dev_ptr, size)
+    gpu.free(dev_ptr)
+
+    noise_image = torch.from_numpy(result)
+    output_file = f"generated_gpu{selected}.png"
+    save_image(noise_image, output_file)
+
+    print(f"Transfer Size     : {size / 1024**2:.2f} MB (round-trip via network)")
+    print(f"Image saved       : {output_file}")
+else:
+    print("Generating 512x512 image on LOCAL GPU...")
+    device = torch.device(f"cuda:{selected}")
+    noise_image = torch.rand(1, 3, 512, 512, device=device)
+
+    output_file = f"generated_gpu{selected}.png"
+    save_image(noise_image, output_file)
+
+    print(f"Tensor Device     : {noise_image.device}")
+    print(f"Memory Used       : {torch.cuda.memory_allocated(selected) / 1024**2:.2f} MB")
+    print(f"Image saved       : {output_file}")
