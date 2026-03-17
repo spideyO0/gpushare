@@ -503,7 +503,14 @@ foreach ($dll in $apiDlls) {
 # installation's directory - position #1 in search order beats System32.
 Write-Step "Installing DLLs into Python directories for search order priority..."
 
-$criticalDlls = @("nvcuda.dll", "nvml.dll", "cudart64_12.dll", "cudart64_130.dll")
+# IMPORTANT: Do NOT copy nvcuda.dll or nvml.dll to Python directories.
+# PyTorch's c10_cuda.dll loads nvcuda.dll and calls real NVIDIA driver
+# functions that gpushare does not export. Overriding nvcuda.dll breaks
+# PyTorch with "WinError 127: The specified procedure could not be found".
+#
+# Only override cudart DLLs - these are the CUDA Runtime API that
+# applications call directly. gpushare handles local+remote GPU routing.
+$criticalDlls = @("cudart64_12.dll", "cudart64_130.dll")
 
 # Find all Python installations
 $pythonDirs = @()
@@ -517,6 +524,25 @@ $pythonDirs += Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python*" -Direct
 $pythonDirs += Get-ChildItem "C:\Python*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
 # Deduplicate
 $pythonDirs = $pythonDirs | Sort-Object -Unique | Where-Object { Test-Path $_ }
+
+# First, clean up any nvcuda.dll/nvml.dll from previous installs that broke PyTorch
+$dangerousDlls = @("nvcuda.dll", "nvml.dll")
+foreach ($pyDir in $pythonDirs) {
+    foreach ($dll in $dangerousDlls) {
+        $dllPath = Join-Path $pyDir $dll
+        if (Test-Path $dllPath) {
+            $ourDll = Join-Path $InstallDir $dll
+            if (Test-Path $ourDll) {
+                $dstSize = (Get-Item $dllPath).Length
+                $ourSize = (Get-Item $ourDll).Length
+                if ($dstSize -eq $ourSize) {
+                    Remove-Item -Force $dllPath -ErrorAction SilentlyContinue
+                    Write-Ok "Removed incorrectly placed $dll from $pyDir"
+                }
+            }
+        }
+    }
+}
 
 if ($pythonDirs.Count -eq 0) {
     Write-Warn "No Python installations found - DLL override limited to PATH priority"
@@ -552,41 +578,32 @@ if ($pythonDirs.Count -eq 0) {
     Write-Info "DLLs installed to $($pythonDirs.Count) Python directory(s) for search order priority"
 }
 
-# Also try to install into any conda/venv site-packages torch directories
-# PyTorch bundles its own nvcuda.dll in torch\lib\ - we need to override that too
-$torchLibDirs = @()
+# IMPORTANT: Do NOT override torch\lib\ DLLs. PyTorch's internal c10_cuda.dll
+# depends on real NVIDIA driver functions that gpushare does not export.
+# Overriding torch\lib\nvcuda.dll breaks PyTorch with WinError 127.
+#
+# If a previous install placed DLLs in torch\lib\, restore them now.
 foreach ($pyDir in $pythonDirs) {
     $torchLib = Join-Path $pyDir "Lib\site-packages\torch\lib"
-    if (Test-Path $torchLib) { $torchLibDirs += $torchLib }
-}
-# Also check the current venv
-if ($env:VIRTUAL_ENV) {
-    $venvTorch = Join-Path $env:VIRTUAL_ENV "Lib\site-packages\torch\lib"
-    if (Test-Path $venvTorch) { $torchLibDirs += $venvTorch }
-}
-
-foreach ($torchDir in $torchLibDirs) {
-    $count = 0
-    foreach ($dll in $criticalDlls) {
-        $srcDll = Join-Path $InstallDir $dll
-        $dstDll = Join-Path $torchDir $dll
-        if (-not (Test-Path $srcDll)) { continue }
-        # Backup original torch DLL
-        if (Test-Path $dstDll) {
+    if (-not (Test-Path $torchLib)) { continue }
+    foreach ($dll in @("nvcuda.dll", "nvml.dll", "cudart64_12.dll", "cudart64_130.dll")) {
+        $dstDll = Join-Path $torchLib $dll
+        if (-not (Test-Path $dstDll)) { continue }
+        $dstSize = (Get-Item $dstDll).Length
+        $ourDll = Join-Path $InstallDir $dll
+        if (-not (Test-Path $ourDll)) { continue }
+        $ourSize = (Get-Item $ourDll).Length
+        if ($dstSize -eq $ourSize) {
+            # This is our DLL in torch\lib - remove it or restore backup
             $backupPath = Join-Path $realBackupDir "torch_$dll"
-            $realSize = (Get-Item $dstDll).Length
-            $ourSize = (Get-Item $srcDll).Length
-            if (($realSize -ne $ourSize) -and (-not (Test-Path $backupPath))) {
-                Copy-Item -Force $dstDll $backupPath
+            if (Test-Path $backupPath) {
+                Copy-Item -Force $backupPath $dstDll
+                Write-Ok "Restored original $dll in torch\lib (was incorrectly overridden)"
+            } else {
+                Remove-Item -Force $dstDll -ErrorAction SilentlyContinue
+                Write-Ok "Removed gpushare $dll from torch\lib (was incorrectly placed)"
             }
         }
-        try {
-            Copy-Item -Force $srcDll $dstDll
-            $count++
-        } catch { }
-    }
-    if ($count -gt 0) {
-        Write-Ok "Installed $count DLLs to $torchDir (PyTorch override)"
     }
 }
 
