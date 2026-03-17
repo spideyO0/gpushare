@@ -270,6 +270,8 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o
 CMakeFiles/gpushare-server.dir/server/server.cpp.o
  /home/spideyo0/gpushare/server/server.cpp
  /home/spideyo0/gpushare/include/gpushare/protocol.h
+ /home/spideyo0/gpushare/include/gpushare/rdma_transport.h
+ /home/spideyo0/gpushare/include/gpushare/transport.h
  /opt/cuda/targets/x86_64-linux/include/builtin_types.h
  /opt/cuda/targets/x86_64-linux/include/channel_descriptor.h
  /opt/cuda/targets/x86_64-linux/include/crt/host_config.h
@@ -328,6 +330,7 @@ CMakeFiles/gpushare-server.dir/server/server.cpp.o
  /usr/include/bits/local_lim.h
  /usr/include/bits/locale.h
  /usr/include/bits/long-double.h
+ /usr/include/bits/netdb.h
  /usr/include/bits/posix1_lim.h
  /usr/include/bits/posix2_lim.h
  /usr/include/bits/posix_opt.h
@@ -578,9 +581,14 @@ CMakeFiles/gpushare-server.dir/server/server.cpp.o
  /usr/include/gnu/stubs-64.h
  /usr/include/gnu/stubs.h
  /usr/include/ifaddrs.h
+ /usr/include/infiniband/ib_user_ioctl_verbs.h
+ /usr/include/infiniband/sa.h
+ /usr/include/infiniband/verbs.h
+ /usr/include/infiniband/verbs_api.h
  /usr/include/limits.h
  /usr/include/linux/close_range.h
  /usr/include/linux/errno.h
+ /usr/include/linux/if_ether.h
  /usr/include/linux/ioctl.h
  /usr/include/linux/limits.h
  /usr/include/linux/posix_types.h
@@ -590,9 +598,13 @@ CMakeFiles/gpushare-server.dir/server/server.cpp.o
  /usr/include/linux/types.h
  /usr/include/locale.h
  /usr/include/net/if.h
+ /usr/include/netdb.h
  /usr/include/netinet/in.h
  /usr/include/netinet/tcp.h
  /usr/include/pthread.h
+ /usr/include/rdma/ib_user_verbs.h
+ /usr/include/rdma/rdma_cma.h
+ /usr/include/rpc/netdb.h
  /usr/include/sched.h
  /usr/include/signal.h
  /usr/include/stdc-predef.h
@@ -640,9 +652,13 @@ gpushare-server
  /usr/lib/libc.so.6
  /usr/lib/libc_nonshared.a
  /usr/lib/libdl.so.2
+ /usr/lib/libibverbs.so
  /usr/lib/libm.so.6
  /usr/lib/libmvec.so.1
+ /usr/lib/libnl-3.so.200
+ /usr/lib/libnl-route-3.so.200
  /usr/lib/libpthread.so.0
+ /usr/lib/librdmacm.so
  /usr/lib/librt.a
  /usr/lib/librt.so.1
  /usr/lib32/libdl.so.2

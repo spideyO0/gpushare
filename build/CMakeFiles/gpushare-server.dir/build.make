@@ -130,6 +130,8 @@ gpushare-server: CMakeFiles/gpushare-server.dir/build.make
 gpushare-server: CMakeFiles/gpushare-server.dir/compiler_depend.ts
 gpushare-server: /opt/cuda/lib/libcudart.so
 gpushare-server: /opt/cuda/targets/x86_64-linux/lib/stubs/libcuda.so
+gpushare-server: /usr/lib/libibverbs.so
+gpushare-server: /usr/lib/librdmacm.so
 gpushare-server: /usr/lib/librt.a
 gpushare-server: CMakeFiles/gpushare-server.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/spideyo0/gpushare/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Linking CXX executable gpushare-server"

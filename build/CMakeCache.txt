@@ -458,6 +458,21 @@ CUDA_nvtx3_interop_LIBRARY:FILEPATH=/opt/cuda/lib/libnvtx3interop.so
 //Path to a library.
 CUDA_pcsamplingutil_LIBRARY:FILEPATH=/opt/cuda/lib/libpcsamplingutil.so
 
+//Enable RDMA/InfiniBand transport (auto-detected)
+ENABLE_RDMA:BOOL=ON
+
+//Path to a file.
+IBVERBS_INCLUDE:PATH=/usr/include
+
+//Path to a library.
+IBVERBS_LIB:FILEPATH=/usr/lib/libibverbs.so
+
+//Path to a file.
+RDMACM_INCLUDE:PATH=/usr/include
+
+//Path to a library.
+RDMACM_LIB:FILEPATH=/usr/lib/librdmacm.so
+
 //Value Computed by CMake
 gpushare_BINARY_DIR:STATIC=/home/spideyo0/gpushare/build
 

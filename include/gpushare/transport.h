@@ -196,10 +196,25 @@ private:
 
 /* ── Factory for creating transports ─────────────────────── */
 
+#ifdef GPUSHARE_HAS_RDMA
+#include "gpushare/rdma_transport.h"
+#endif
+
 inline std::unique_ptr<Transport> create_transport(const char *type) {
-    /* Currently only TCP is supported. Future: "rdma", "shm" */
+#ifdef GPUSHARE_HAS_RDMA
+    if (type && strcmp(type, "rdma") == 0)
+        return std::make_unique<RdmaTransport>();
+#endif
     (void)type;
     return std::make_unique<TcpTransport>();
+}
+
+inline bool transport_available(const char *type) {
+#ifdef GPUSHARE_HAS_RDMA
+    if (type && strcmp(type, "rdma") == 0) return true;
+#endif
+    if (type && strcmp(type, "tcp") == 0) return true;
+    return false;
 }
 
 #endif /* GPUSHARE_TRANSPORT_H */

@@ -182,6 +182,7 @@ static int g_active_device = 0;
 static int g_remote_base = 0;       /* first remote device index = g_local.local_count */
 static std::string g_gpu_mode = "all";  /* "all", "remote", "local" */
 static std::string g_real_cuda_path = REAL_CUDA_DEFAULT_PATH;
+static std::string g_transport_type = "tcp";  /* Phase 9: "tcp" or "rdma" */
 static bool g_local_initialized = false;
 
 static bool is_remote_device(int dev) {
@@ -427,7 +428,7 @@ static int g_verbose = 0;
 
 /* ── Connection state ────────────────────────────────────── */
 static sock_t       g_sock = SOCK_INVALID;
-static std::unique_ptr<TcpTransport> g_transport;  /* Phase 8: transport abstraction */
+static std::unique_ptr<Transport> g_transport;  /* Phase 8+9: transport abstraction */
 static std::mutex   g_send_mtx;     /* Phase 4: protects send() calls only */
 static std::atomic<uint32_t> g_req_id{1};
 static std::string  g_server_host = "localhost";
@@ -584,6 +585,7 @@ static void load_config_file(const char *path) {
         else if (key == "log_level" && val == "debug") g_verbose = 1;
         else if (key == "gpu_mode") g_gpu_mode = val;
         else if (key == "real_cuda_path") g_real_cuda_path = val;
+        else if (key == "transport") g_transport_type = val;
     }
     TRACE("Loaded config from %s", path);
 }
@@ -629,23 +631,44 @@ static void load_config() {
 }
 
 static bool ensure_connected() {
-    if (g_transport && g_transport->is_valid()) return true;
+    if (g_transport) return true;
 
     load_config();
 
     sock_init();
 
-    TRACE("Connecting to %s:%d", g_server_host.c_str(), g_server_port);
+    TRACE("Connecting to %s:%d (transport=%s)", g_server_host.c_str(), g_server_port,
+          g_transport_type.c_str());
 
-    /* Phase 8: Use TcpTransport for connection */
-    auto tcp = std::make_unique<TcpTransport>();
-    if (!tcp->connect(g_server_host.c_str(), g_server_port)) {
-        ERR("Cannot connect to gpushare server at %s:%d", g_server_host.c_str(), g_server_port);
-        return false;
+    /* Phase 8+9: Create transport based on config */
+#ifdef GPUSHARE_HAS_RDMA
+    if (g_transport_type == "rdma") {
+        auto rdma = std::make_unique<RdmaTransport>();
+        if (!rdma->connect(g_server_host.c_str(), g_server_port)) {
+            ERR("RDMA connect failed to %s:%d — falling back to TCP",
+                g_server_host.c_str(), g_server_port);
+            g_transport_type = "tcp";
+            /* fall through to TCP */
+        } else {
+            g_sock = SOCK_INVALID;  /* no raw fd for RDMA */
+            g_transport = std::unique_ptr<Transport>(rdma.release());
+            goto transport_ready;
+        }
     }
-    tcp->optimize(true);  /* LAN settings by default */
-    g_sock = tcp->raw_fd();  /* keep g_sock for backward compat */
-    g_transport = std::move(tcp);
+#endif
+    {
+        auto tcp = std::make_unique<TcpTransport>();
+        if (!tcp->connect(g_server_host.c_str(), g_server_port)) {
+            ERR("Cannot connect to gpushare server at %s:%d", g_server_host.c_str(), g_server_port);
+            return false;
+        }
+        tcp->optimize(true);  /* LAN settings by default */
+        g_sock = tcp->raw_fd();  /* keep g_sock for backward compat */
+        g_transport = std::unique_ptr<Transport>(tcp.release());
+    }
+#ifdef GPUSHARE_HAS_RDMA
+transport_ready:
+#endif
 
     /* Send init — done before recv thread starts, so we use transport directly */
     gs_header_t hdr;

@@ -128,6 +128,8 @@ libgpushare_client.so.1.0.0: CMakeFiles/gpushare_client.dir/client/generated_stu
 libgpushare_client.so.1.0.0: CMakeFiles/gpushare_client.dir/client/generated_all_stubs.cpp.o
 libgpushare_client.so.1.0.0: CMakeFiles/gpushare_client.dir/build.make
 libgpushare_client.so.1.0.0: CMakeFiles/gpushare_client.dir/compiler_depend.ts
+libgpushare_client.so.1.0.0: /usr/lib/libibverbs.so
+libgpushare_client.so.1.0.0: /usr/lib/librdmacm.so
 libgpushare_client.so.1.0.0: CMakeFiles/gpushare_client.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/spideyo0/gpushare/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Linking CXX shared library libgpushare_client.so"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/gpushare_client.dir/link.txt --verbose=$(VERBOSE)

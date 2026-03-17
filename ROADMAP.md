@@ -177,7 +177,7 @@ public:
 
 ---
 
-## Phase 9: InfiniBand / RDMA Transport (planned)
+## Phase 9: InfiniBand / RDMA Transport (done)
 
 **Gap:** rCUDA achieves 97.7% wire speed on InfiniBand via native Verbs API. gpushare on TCP over InfiniBand gets maybe 30-40% due to kernel overhead.
 
@@ -313,7 +313,7 @@ done     Phase 6: D2H Speculative Prefetch ────────── GPU pr
            │
 done     Phase 7: Adaptive Buffer Sizing ──────────── rCUDA's configurable tiered pools
 done     Phase 8: Network Transport Abstraction ───── prerequisite for RDMA
-planned  Phase 9: InfiniBand / RDMA Transport ─────── rCUDA's key advantage (97.7% wire speed)
+done     Phase 9: InfiniBand / RDMA Transport ─────── rCUDA's key advantage (97.7% wire speed)
 planned  Phase 10: Transfer Compression ────────────── rCUDA 2022 pipelined compression
 planned  Phase 11: Multi-Server GPU Pooling ────────── rCUDA's multi-node GPU sharing
            │
@@ -335,7 +335,7 @@ research Phase 13: GPUDirect RDMA ───────────────�
 | D2H prefetch/overlap | Yes | Yes (Phase 6) | Yes |
 | Adaptive buffer sizing | Yes (per size range) | Yes (Phase 7) | Yes |
 | Network abstraction | Modular (runtime) | Yes (Phase 8) | Yes |
-| InfiniBand Verbs | Yes (97.7% wire) | No | Phase 9 |
+| InfiniBand Verbs | Yes (97.7% wire) | Yes (Phase 9, optional) | Yes |
 | GPUDirect RDMA | Yes | No | Phase 13 |
 | Transfer compression | Yes (2022) | No | Phase 10 |
 | Multi-server pooling | Yes | No | Phase 11 |

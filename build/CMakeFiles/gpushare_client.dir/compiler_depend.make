@@ -120,6 +120,8 @@ CMakeFiles/gpushare_client.dir/client/generated_stubs.cpp.o: /home/spideyo0/gpus
 CMakeFiles/gpushare_client.dir/client/gpushare_client.cpp.o: /home/spideyo0/gpushare/client/gpushare_client.cpp \
   /home/spideyo0/gpushare/include/gpushare/cuda_defs.h \
   /home/spideyo0/gpushare/include/gpushare/protocol.h \
+  /home/spideyo0/gpushare/include/gpushare/rdma_transport.h \
+  /home/spideyo0/gpushare/include/gpushare/transport.h \
   /usr/include/alloca.h \
   /usr/include/arpa/inet.h \
   /usr/include/asm-generic/bitsperlong.h \
@@ -382,8 +384,13 @@ CMakeFiles/gpushare_client.dir/client/gpushare_client.cpp.o: /home/spideyo0/gpus
   /usr/include/features.h \
   /usr/include/gnu/stubs-64.h \
   /usr/include/gnu/stubs.h \
+  /usr/include/infiniband/ib_user_ioctl_verbs.h \
+  /usr/include/infiniband/sa.h \
+  /usr/include/infiniband/verbs.h \
+  /usr/include/infiniband/verbs_api.h \
   /usr/include/linux/close_range.h \
   /usr/include/linux/errno.h \
+  /usr/include/linux/if_ether.h \
   /usr/include/linux/posix_types.h \
   /usr/include/linux/sched/types.h \
   /usr/include/linux/stddef.h \
@@ -393,6 +400,8 @@ CMakeFiles/gpushare_client.dir/client/gpushare_client.cpp.o: /home/spideyo0/gpus
   /usr/include/netinet/in.h \
   /usr/include/netinet/tcp.h \
   /usr/include/pthread.h \
+  /usr/include/rdma/ib_user_verbs.h \
+  /usr/include/rdma/rdma_cma.h \
   /usr/include/rpc/netdb.h \
   /usr/include/sched.h \
   /usr/include/stdc-predef.h \
@@ -430,8 +439,10 @@ libgpushare_client.so: /usr/lib/crti.o \
   /usr/lib/ld-linux-x86-64.so.2 \
   /usr/lib/libc.so.6 \
   /usr/lib/libc_nonshared.a \
+  /usr/lib/libibverbs.so \
   /usr/lib/libm.so.6 \
   /usr/lib/libmvec.so.1 \
+  /usr/lib/librdmacm.so \
   CMakeFiles/gpushare_client.dir/client/generated_all_stubs.cpp.o \
   CMakeFiles/gpushare_client.dir/client/generated_stubs.cpp.o \
   CMakeFiles/gpushare_client.dir/client/gpushare_client.cpp.o
@@ -442,6 +453,8 @@ CMakeFiles/gpushare_client.dir/client/generated_stubs.cpp.o:
 /usr/lib/libmvec.so.1:
 
 /usr/lib/libm.so.6:
+
+/usr/lib/libibverbs.so:
 
 /usr/lib/libc.so.6:
 
@@ -475,6 +488,8 @@ CMakeFiles/gpushare_client.dir/client/generated_stubs.cpp.o:
 
 /usr/include/rpc/netdb.h:
 
+/usr/include/rdma/ib_user_verbs.h:
+
 /usr/include/netinet/tcp.h:
 
 /usr/include/netinet/in.h:
@@ -490,6 +505,10 @@ CMakeFiles/gpushare_client.dir/client/generated_stubs.cpp.o:
 /usr/include/linux/errno.h:
 
 /usr/include/linux/close_range.h:
+
+/usr/include/infiniband/verbs.h:
+
+/usr/include/infiniband/ib_user_ioctl_verbs.h:
 
 /usr/include/dlfcn.h:
 
@@ -509,17 +528,17 @@ CMakeFiles/gpushare_client.dir/client/generated_stubs.cpp.o:
 
 /usr/include/c++/15.2.1/x86_64-pc-linux-gnu/bits/basic_file.h:
 
+/usr/include/rdma/rdma_cma.h:
+
 /usr/include/c++/15.2.1/unordered_map:
 
 /usr/include/c++/15.2.1/typeinfo:
 
 /usr/include/c++/15.2.1/thread:
 
-/usr/lib/libc.so:
+/usr/include/c++/15.2.1/string_view:
 
-/usr/include/bits/pthreadtypes.h:
-
-/usr/include/c++/15.2.1/bits/exception_ptr.h:
+/usr/include/c++/15.2.1/string:
 
 /usr/include/bits/posix_opt.h:
 
@@ -558,6 +577,8 @@ CMakeFiles/gpushare_client.dir/client/generated_all_stubs.cpp.o:
 /usr/include/bits/mman-linux.h:
 
 /usr/include/c++/15.2.1/bits/ostream.h:
+
+/home/spideyo0/gpushare/include/gpushare/transport.h:
 
 /usr/include/bits/floatn.h:
 
@@ -639,6 +660,8 @@ CMakeFiles/gpushare_client.dir/client/generated_all_stubs.cpp.o:
 
 /usr/include/strings.h:
 
+/usr/lib/librdmacm.so:
+
 /usr/include/c++/15.2.1/bits/allocated_ptr.h:
 
 /usr/include/c++/15.2.1/cwctype:
@@ -659,11 +682,9 @@ CMakeFiles/gpushare_client.dir/client/generated_all_stubs.cpp.o:
 
 /usr/include/c++/15.2.1/bits/fstream.tcc:
 
+/home/spideyo0/gpushare/include/gpushare/rdma_transport.h:
+
 /usr/include/c++/15.2.1/bits/stl_bvector.h:
-
-/usr/include/bits/pthreadtypes-arch.h:
-
-/usr/include/gnu/stubs.h:
 
 /usr/include/bits/types/struct_osockaddr.h:
 
@@ -671,7 +692,9 @@ CMakeFiles/gpushare_client.dir/client/generated_all_stubs.cpp.o:
 
 /usr/include/sys/cdefs.h:
 
-/usr/include/c++/15.2.1/string:
+/usr/include/gnu/stubs.h:
+
+/usr/include/bits/pthreadtypes-arch.h:
 
 /usr/include/asm-generic/int-ll64.h:
 
@@ -716,6 +739,8 @@ CMakeFiles/gpushare_client.dir/client/generated_all_stubs.cpp.o:
 /usr/include/c++/15.2.1/bits/uses_allocator.h:
 
 /usr/include/c++/15.2.1/x86_64-pc-linux-gnu/bits/cpu_defines.h:
+
+/usr/include/linux/if_ether.h:
 
 /usr/include/bits/mman.h:
 
@@ -875,6 +900,12 @@ CMakeFiles/gpushare_client.dir/client/generated_all_stubs.cpp.o:
 
 /usr/include/c++/15.2.1/bits/stl_algobase.h:
 
+/usr/lib/libc.so:
+
+/usr/include/bits/pthreadtypes.h:
+
+/usr/include/c++/15.2.1/bits/exception_ptr.h:
+
 /usr/include/bits/select.h:
 
 /usr/include/bits/setjmp.h:
@@ -985,6 +1016,8 @@ CMakeFiles/gpushare_client.dir/client/generated_all_stubs.cpp.o:
 
 /usr/include/c++/15.2.1/bits/shared_ptr_base.h:
 
+/usr/include/infiniband/verbs_api.h:
+
 /usr/include/c++/15.2.1/bits/hashtable.h:
 
 /usr/include/c++/15.2.1/bits/hashtable_policy.h:
@@ -1031,6 +1064,8 @@ CMakeFiles/gpushare_client.dir/client/gpushare_client.cpp.o:
 
 /usr/include/c++/15.2.1/bits/std_function.h:
 
+/usr/include/infiniband/sa.h:
+
 /usr/include/bits/environments.h:
 
 /usr/include/bits/types/struct_FILE.h:
@@ -1072,5 +1107,3 @@ CMakeFiles/gpushare_client.dir/client/gpushare_client.cpp.o:
 /usr/include/bits/floatn-common.h:
 
 /usr/include/c++/15.2.1/ratio:
-
-/usr/include/c++/15.2.1/string_view:

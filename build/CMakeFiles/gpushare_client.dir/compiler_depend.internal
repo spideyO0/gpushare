@@ -123,6 +123,8 @@ CMakeFiles/gpushare_client.dir/client/gpushare_client.cpp.o
  /home/spideyo0/gpushare/client/gpushare_client.cpp
  /home/spideyo0/gpushare/include/gpushare/cuda_defs.h
  /home/spideyo0/gpushare/include/gpushare/protocol.h
+ /home/spideyo0/gpushare/include/gpushare/rdma_transport.h
+ /home/spideyo0/gpushare/include/gpushare/transport.h
  /usr/include/alloca.h
  /usr/include/arpa/inet.h
  /usr/include/asm-generic/bitsperlong.h
@@ -385,8 +387,13 @@ CMakeFiles/gpushare_client.dir/client/gpushare_client.cpp.o
  /usr/include/features.h
  /usr/include/gnu/stubs-64.h
  /usr/include/gnu/stubs.h
+ /usr/include/infiniband/ib_user_ioctl_verbs.h
+ /usr/include/infiniband/sa.h
+ /usr/include/infiniband/verbs.h
+ /usr/include/infiniband/verbs_api.h
  /usr/include/linux/close_range.h
  /usr/include/linux/errno.h
+ /usr/include/linux/if_ether.h
  /usr/include/linux/posix_types.h
  /usr/include/linux/sched/types.h
  /usr/include/linux/stddef.h
@@ -396,6 +403,8 @@ CMakeFiles/gpushare_client.dir/client/gpushare_client.cpp.o
  /usr/include/netinet/in.h
  /usr/include/netinet/tcp.h
  /usr/include/pthread.h
+ /usr/include/rdma/ib_user_verbs.h
+ /usr/include/rdma/rdma_cma.h
  /usr/include/rpc/netdb.h
  /usr/include/sched.h
  /usr/include/stdc-predef.h
@@ -434,8 +443,10 @@ libgpushare_client.so
  /usr/lib/ld-linux-x86-64.so.2
  /usr/lib/libc.so.6
  /usr/lib/libc_nonshared.a
+ /usr/lib/libibverbs.so
  /usr/lib/libm.so.6
  /usr/lib/libmvec.so.1
+ /usr/lib/librdmacm.so
  /home/spideyo0/gpushare/build/CMakeFiles/gpushare_client.dir/client/generated_all_stubs.cpp.o
  /home/spideyo0/gpushare/build/CMakeFiles/gpushare_client.dir/client/generated_stubs.cpp.o
  /home/spideyo0/gpushare/build/CMakeFiles/gpushare_client.dir/client/gpushare_client.cpp.o

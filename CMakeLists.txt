@@ -8,6 +8,30 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # Common include path
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
+# ── RDMA / InfiniBand support (Phase 9) — auto-detected ────
+# Automatically enables RDMA if rdma-core (libibverbs + librdmacm) is found.
+# Use -DENABLE_RDMA=OFF to force-disable even when libraries are present.
+option(ENABLE_RDMA "Enable RDMA/InfiniBand transport (auto-detected)" ON)
+set(HAVE_RDMA OFF)
+if(ENABLE_RDMA AND NOT WIN32)
+    find_library(IBVERBS_LIB ibverbs)
+    find_library(RDMACM_LIB rdmacm)
+    find_path(IBVERBS_INCLUDE infiniband/verbs.h)
+    find_path(RDMACM_INCLUDE rdma/rdma_cma.h)
+    if(IBVERBS_LIB AND RDMACM_LIB AND IBVERBS_INCLUDE AND RDMACM_INCLUDE)
+        set(HAVE_RDMA ON)
+        message(STATUS "RDMA: ENABLED (libibverbs + librdmacm auto-detected)")
+    else()
+        message(STATUS "RDMA: not available (install rdma-core for InfiniBand support)")
+    endif()
+else()
+    if(WIN32)
+        message(STATUS "RDMA: not supported on Windows")
+    elseif(NOT ENABLE_RDMA)
+        message(STATUS "RDMA: disabled by -DENABLE_RDMA=OFF")
+    endif()
+endif()
+
 # ── Server (requires CUDA toolkit) ──────────────────────────
 option(BUILD_SERVER "Build the GPU server (requires CUDA)" ON)
 if(BUILD_SERVER)
@@ -28,6 +52,11 @@ if(BUILD_SERVER)
         target_compile_definitions(gpushare-server PRIVATE
             _GNU_SOURCE
         )
+        if(HAVE_RDMA)
+            target_compile_definitions(gpushare-server PRIVATE GPUSHARE_HAS_RDMA)
+            target_link_libraries(gpushare-server PRIVATE ${IBVERBS_LIB} ${RDMACM_LIB})
+            target_include_directories(gpushare-server PRIVATE ${IBVERBS_INCLUDE} ${RDMACM_INCLUDE})
+        endif()
         install(TARGETS gpushare-server RUNTIME DESTINATION bin)
         message(STATUS "Server: ENABLED (CUDA ${CUDAToolkit_VERSION})")
     else()
@@ -59,6 +88,11 @@ if(BUILD_CLIENT)
         # dl is needed for dlopen/dlsym (local GPU passthrough)
         # pthread is needed for the recv thread (Phase 4 pipelining)
         target_link_libraries(gpushare_client PRIVATE dl pthread)
+        if(HAVE_RDMA)
+            target_compile_definitions(gpushare_client PRIVATE GPUSHARE_HAS_RDMA)
+            target_link_libraries(gpushare_client PRIVATE ${IBVERBS_LIB} ${RDMACM_LIB})
+            target_include_directories(gpushare_client PRIVATE ${IBVERBS_INCLUDE} ${RDMACM_INCLUDE})
+        endif()
     endif()
 
     # Export CUDA symbols so LD_PRELOAD / DYLD_INSERT_LIBRARIES works

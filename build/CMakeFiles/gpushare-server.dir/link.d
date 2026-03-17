@@ -9,6 +9,8 @@ gpushare-server: \
   /opt/cuda/targets/x86_64-linux/lib/stubs/libcuda.so \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libpthread.a \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libdl.a \
+  /usr/lib/libibverbs.so \
+  /usr/lib/librdmacm.so \
   /usr/lib/librt.a \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libdl.a \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libstdc++.so \
@@ -43,7 +45,9 @@ gpushare-server: \
   /usr/lib/libpthread.so.0 \
   /usr/lib32/librt.so.1 \
   /usr/lib/librt.so.1 \
-  /usr/lib/ld-linux-x86-64.so.2
+  /usr/lib/ld-linux-x86-64.so.2 \
+  /usr/lib/libnl-route-3.so.200 \
+  /usr/lib/libnl-3.so.200
 
 /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/Scrt1.o:
 
@@ -64,6 +68,10 @@ CMakeFiles/gpushare-server.dir/server/generated_all_dispatch.cpp.o:
 /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libpthread.a:
 
 /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libdl.a:
+
+/usr/lib/libibverbs.so:
+
+/usr/lib/librdmacm.so:
 
 /usr/lib/librt.a:
 
@@ -134,3 +142,7 @@ CMakeFiles/gpushare-server.dir/server/generated_all_dispatch.cpp.o:
 /usr/lib/librt.so.1:
 
 /usr/lib/ld-linux-x86-64.so.2:
+
+/usr/lib/libnl-route-3.so.200:
+
+/usr/lib/libnl-3.so.200:

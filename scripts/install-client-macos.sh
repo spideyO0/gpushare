@@ -399,7 +399,7 @@ echo -e "  Library:         $LIB_DIR/libgpushare_client.dylib"
 echo -e "  Config:          $CONF_DIR/client.conf"
 echo -e "  CUDA override:   ${GREEN}ACTIVE${NC} (libcudart.dylib -> gpushare)"
 echo -e "  API coverage:    2600+ functions (cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSOLVER, cuRAND, NVRTC, nvJPEG)"
-echo -e "  Transfer opts:   ${GREEN}ACTIVE${NC} (tiered pinned pools, async memcpy, chunked pipelining, D2H prefetch, modular transport)"
+echo -e "  Transfer opts:   ${GREEN}ACTIVE${NC} (tiered pinned pools, async memcpy, chunked pipelining, D2H prefetch, RDMA auto-detect)"
 echo
 echo -e "  ${BOLD}Usage — CUDA programs work transparently:${NC}"
 echo -e "    python3 my_training.py        ${CYAN}# uses remote GPU${NC}"

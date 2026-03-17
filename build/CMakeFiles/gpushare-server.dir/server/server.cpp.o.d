@@ -254,4 +254,10 @@ CMakeFiles/gpushare-server.dir/server/server.cpp.o: \
  /usr/include/c++/15.2.1/bits/stl_relops.h \
  /home/spideyo0/gpushare/include/gpushare/protocol.h \
  /home/spideyo0/gpushare/include/gpushare/transport.h \
- /usr/include/netdb.h /usr/include/rpc/netdb.h /usr/include/bits/netdb.h
+ /usr/include/netdb.h /usr/include/rpc/netdb.h /usr/include/bits/netdb.h \
+ /home/spideyo0/gpushare/include/gpushare/rdma_transport.h \
+ /usr/include/infiniband/verbs.h /usr/include/linux/if_ether.h \
+ /usr/include/infiniband/verbs_api.h \
+ /usr/include/infiniband/ib_user_ioctl_verbs.h \
+ /usr/include/rdma/ib_user_verbs.h /usr/include/rdma/rdma_cma.h \
+ /usr/include/infiniband/sa.h

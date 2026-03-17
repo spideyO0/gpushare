@@ -267,6 +267,8 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o: /home/spideyo0/g
 
 CMakeFiles/gpushare-server.dir/server/server.cpp.o: /home/spideyo0/gpushare/server/server.cpp \
   /home/spideyo0/gpushare/include/gpushare/protocol.h \
+  /home/spideyo0/gpushare/include/gpushare/rdma_transport.h \
+  /home/spideyo0/gpushare/include/gpushare/transport.h \
   /opt/cuda/targets/x86_64-linux/include/builtin_types.h \
   /opt/cuda/targets/x86_64-linux/include/channel_descriptor.h \
   /opt/cuda/targets/x86_64-linux/include/crt/host_config.h \
@@ -325,6 +327,7 @@ CMakeFiles/gpushare-server.dir/server/server.cpp.o: /home/spideyo0/gpushare/serv
   /usr/include/bits/local_lim.h \
   /usr/include/bits/locale.h \
   /usr/include/bits/long-double.h \
+  /usr/include/bits/netdb.h \
   /usr/include/bits/posix1_lim.h \
   /usr/include/bits/posix2_lim.h \
   /usr/include/bits/posix_opt.h \
@@ -575,9 +578,14 @@ CMakeFiles/gpushare-server.dir/server/server.cpp.o: /home/spideyo0/gpushare/serv
   /usr/include/gnu/stubs-64.h \
   /usr/include/gnu/stubs.h \
   /usr/include/ifaddrs.h \
+  /usr/include/infiniband/ib_user_ioctl_verbs.h \
+  /usr/include/infiniband/sa.h \
+  /usr/include/infiniband/verbs.h \
+  /usr/include/infiniband/verbs_api.h \
   /usr/include/limits.h \
   /usr/include/linux/close_range.h \
   /usr/include/linux/errno.h \
+  /usr/include/linux/if_ether.h \
   /usr/include/linux/ioctl.h \
   /usr/include/linux/limits.h \
   /usr/include/linux/posix_types.h \
@@ -587,9 +595,13 @@ CMakeFiles/gpushare-server.dir/server/server.cpp.o: /home/spideyo0/gpushare/serv
   /usr/include/linux/types.h \
   /usr/include/locale.h \
   /usr/include/net/if.h \
+  /usr/include/netdb.h \
   /usr/include/netinet/in.h \
   /usr/include/netinet/tcp.h \
   /usr/include/pthread.h \
+  /usr/include/rdma/ib_user_verbs.h \
+  /usr/include/rdma/rdma_cma.h \
+  /usr/include/rpc/netdb.h \
   /usr/include/sched.h \
   /usr/include/signal.h \
   /usr/include/stdc-predef.h \
@@ -636,9 +648,13 @@ gpushare-server: /opt/cuda/lib/libcudart.so \
   /usr/lib/libc.so.6 \
   /usr/lib/libc_nonshared.a \
   /usr/lib/libdl.so.2 \
+  /usr/lib/libibverbs.so \
   /usr/lib/libm.so.6 \
   /usr/lib/libmvec.so.1 \
+  /usr/lib/libnl-3.so.200 \
+  /usr/lib/libnl-route-3.so.200 \
   /usr/lib/libpthread.so.0 \
+  /usr/lib/librdmacm.so \
   /usr/lib/librt.a \
   /usr/lib/librt.so.1 \
   /usr/lib32/libdl.so.2 \
@@ -655,9 +671,15 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 
 /usr/lib32/libdl.so.2:
 
+/usr/lib/libnl-route-3.so.200:
+
+/usr/lib/libnl-3.so.200:
+
 /usr/lib/libmvec.so.1:
 
 /usr/lib/libm.so.6:
+
+/usr/lib/libibverbs.so:
 
 /usr/lib/libdl.so.2:
 
@@ -697,6 +719,8 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 
 /usr/include/sched.h:
 
+/usr/include/rpc/netdb.h:
+
 /usr/include/netinet/in.h:
 
 /usr/include/net/if.h:
@@ -711,9 +735,15 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 
 /usr/include/linux/ioctl.h:
 
+/usr/include/linux/if_ether.h:
+
 /usr/include/linux/close_range.h:
 
 /usr/include/limits.h:
+
+/usr/include/infiniband/verbs.h:
+
+/usr/include/infiniband/ib_user_ioctl_verbs.h:
 
 /usr/include/c++/15.2.1/x86_64-pc-linux-gnu/bits/gthr.h:
 
@@ -797,6 +827,8 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 
 /usr/include/c++/15.2.1/bits/exception_ptr.h:
 
+/usr/include/netdb.h:
+
 /usr/include/c++/15.2.1/bits/cxxabi_init_exception.h:
 
 /usr/include/c++/15.2.1/bits/codecvt.h:
@@ -807,6 +839,8 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 
 /usr/include/c++/15.2.1/bits/atomic_base.h:
 
+/usr/lib/librdmacm.so:
+
 /usr/include/c++/15.2.1/bits/allocated_ptr.h:
 
 /usr/lib/librt.a:
@@ -814,6 +848,12 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 /usr/include/c++/15.2.1/bits/algorithmfwd.h:
 
 /usr/include/c++/15.2.1/backward/auto_ptr.h:
+
+/usr/include/c++/15.2.1/atomic:
+
+/usr/include/c++/15.2.1/algorithm:
+
+/usr/include/bits/xopen_lim.h:
 
 /usr/include/c++/15.2.1/string:
 
@@ -892,8 +932,6 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 /usr/include/c++/15.2.1/bits/refwrap.h:
 
 /usr/include/c++/15.2.1/bits/postypes.h:
-
-/usr/include/bits/xopen_lim.h:
 
 /usr/include/c++/15.2.1/bits/ostream_insert.h:
 
@@ -1000,6 +1038,8 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 /usr/include/gnu/stubs.h:
 
 /usr/include/bits/libc-header-start.h:
+
+/usr/include/infiniband/verbs_api.h:
 
 /usr/include/c++/15.2.1/bits/hashtable.h:
 
@@ -1129,6 +1169,8 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 
 /usr/include/bits/types/locale_t.h:
 
+/usr/include/infiniband/sa.h:
+
 /opt/cuda/targets/x86_64-linux/include/surface_types.h:
 
 /usr/include/bits/environments.h:
@@ -1209,6 +1251,8 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 
 /usr/include/dlfcn.h:
 
+/usr/include/bits/netdb.h:
+
 /usr/include/asm-generic/errno.h:
 
 /usr/include/c++/15.2.1/bits/stl_vector.h:
@@ -1257,6 +1301,8 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 
 /usr/include/bits/sigevent-consts.h:
 
+/usr/include/rdma/rdma_cma.h:
+
 /usr/include/c++/15.2.1/unordered_map:
 
 /usr/include/bits/types/stack_t.h:
@@ -1296,6 +1342,10 @@ CMakeFiles/gpushare-server.dir/server/generated_all_dispatch.cpp.o:
 /usr/include/bits/sigstack.h:
 
 /usr/include/bits/types/struct_sched_param.h:
+
+/home/spideyo0/gpushare/include/gpushare/rdma_transport.h:
+
+/home/spideyo0/gpushare/include/gpushare/transport.h:
 
 /usr/include/bits/local_lim.h:
 
@@ -1352,6 +1402,8 @@ CMakeFiles/gpushare-server.dir/server/generated_all_dispatch.cpp.o:
 /usr/include/bits/types/sigval_t.h:
 
 /usr/include/asm/ioctl.h:
+
+/usr/include/rdma/ib_user_verbs.h:
 
 /opt/cuda/targets/x86_64-linux/include/cuda_runtime.h:
 
@@ -1416,7 +1468,3 @@ CMakeFiles/gpushare-server.dir/server/generated_all_dispatch.cpp.o:
 /usr/include/c++/15.2.1/bits/exception.h:
 
 /usr/include/bits/uio_lim.h:
-
-/usr/include/c++/15.2.1/algorithm:
-
-/usr/include/c++/15.2.1/atomic:
