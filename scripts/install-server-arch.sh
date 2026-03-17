@@ -344,7 +344,7 @@ echo -e "  Dashboard:        ${CYAN}http://${LOCAL_IP}:${DASHBOARD_PORT}${NC}"
 echo -e "  Config:           $INSTALL_CONF/server.conf"
 echo -e "  GPU:              $gpu_name"
 echo -e "  API coverage:    2600+ functions (cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSOLVER, cuRAND, NVRTC, nvJPEG)"
-echo -e "  Transfer opts:   ${GREEN}ACTIVE${NC} (tiered pinned pools, async memcpy, chunked pipelining, D2H prefetch, RDMA auto-detect)"
+echo -e "  Transfer opts:   ${GREEN}ACTIVE${NC} (tiered pinned pools, async memcpy, chunked pipelining, D2H prefetch, RDMA, LZ4/zstd)"
 # Check if RDMA was built in (CMake sets IBVERBS_LIB when found)
 if grep -q "^IBVERBS_LIB:FILEPATH=.*libibverbs" "$BUILD_DIR/CMakeCache.txt" 2>/dev/null; then
     echo -e "  RDMA transport:  ${GREEN}BUILT IN${NC} (rdma-core auto-detected)"
@@ -352,6 +352,14 @@ elif [[ -f /usr/lib/libibverbs.so ]] || ldconfig -p 2>/dev/null | grep -q libibv
     echo -e "  RDMA transport:  ${GREEN}AVAILABLE${NC} (rebuild to enable)"
 else
     echo -e "  RDMA transport:  ${YELLOW}NOT AVAILABLE${NC} (install rdma-core for InfiniBand support)"
+fi
+# Check if compression was built in
+if grep -q "^LZ4_LIB:FILEPATH=.*liblz4" "$BUILD_DIR/CMakeCache.txt" 2>/dev/null; then
+    echo -e "  Compression:     ${GREEN}LZ4${NC} (auto-detected)"
+elif grep -q "^ZSTD_LIB:FILEPATH=.*libzstd" "$BUILD_DIR/CMakeCache.txt" 2>/dev/null; then
+    echo -e "  Compression:     ${GREEN}zstd${NC} (auto-detected)"
+else
+    echo -e "  Compression:     ${YELLOW}NOT AVAILABLE${NC} (install lz4 or zstd for transfer compression)"
 fi
 echo
 echo -e "  ${BOLD}Client setup:${NC}"

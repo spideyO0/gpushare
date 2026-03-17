@@ -38,6 +38,7 @@
 #include <cuda_runtime.h>
 #include "gpushare/protocol.h"
 #include "gpushare/transport.h"
+#include "gpushare/compression.h"
 
 /* ── Logging ─────────────────────────────────────────────── */
 static int g_log_level = 1; /* 0=error, 1=info, 2=debug */
@@ -457,6 +458,7 @@ static bool handle_init(ClientSession *s, const gs_header_t *hdr, const uint8_t 
     resp.session_id = s->session_id;
     resp.max_transfer_size = GPUSHARE_MAX_MSG_SIZE - GPUSHARE_HEADER_SIZE;
     resp.capabilities = GS_CAP_ASYNC | GS_CAP_CHUNKED;
+    if (gs_compression_available()) resp.capabilities |= GS_CAP_COMPRESS;
     LOG_INFO("Session %u: client connected from %s (caps=0x%x)",
              s->session_id, s->addr_str, resp.capabilities);
     s->track_op();
@@ -552,9 +554,25 @@ static bool handle_free(ClientSession *s, const gs_header_t *hdr, const uint8_t 
 static bool handle_memcpy_h2d(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
     auto *req = (const gs_memcpy_h2d_req_t*)payload;
     void *dst = (void*)(uintptr_t)req->device_ptr;
-    const void *src = payload + sizeof(gs_memcpy_h2d_req_t);
-    cudaError_t err = cudaMemcpy(dst, src, req->size, cudaMemcpyHostToDevice);
-    s->track_op(req->size, 0);
+    const void *src_data = payload + sizeof(gs_memcpy_h2d_req_t);
+    size_t data_size = req->size;
+
+    /* Phase 10: Decompress if client sent compressed data */
+    std::vector<uint8_t> decomp_buf;
+    if (hdr->flags & GS_FLAG_COMPRESSED) {
+        size_t payload_data_len = hdr->length - GPUSHARE_HEADER_SIZE - sizeof(gs_memcpy_h2d_req_t);
+        decomp_buf.resize(req->size);
+        size_t got = gs_decompress(src_data, payload_data_len, decomp_buf.data(), decomp_buf.size());
+        if (got == 0 || got != req->size) {
+            LOG_WARN("Session %u: decompression failed for H2D (%zu bytes)", s->session_id, req->size);
+            return send_cuda_result(s, hdr->opcode, hdr->req_id, cudaErrorUnknown);
+        }
+        src_data = decomp_buf.data();
+        LOG_DBG("Session %u: H2D decompressed %zu -> %zu bytes", s->session_id, payload_data_len, got);
+    }
+
+    cudaError_t err = cudaMemcpy(dst, src_data, data_size, cudaMemcpyHostToDevice);
+    s->track_op(data_size, 0);
     return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
 }
 

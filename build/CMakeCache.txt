@@ -468,10 +468,22 @@ IBVERBS_INCLUDE:PATH=/usr/include
 IBVERBS_LIB:FILEPATH=/usr/lib/libibverbs.so
 
 //Path to a file.
+LZ4_INCLUDE:PATH=/usr/include
+
+//Path to a library.
+LZ4_LIB:FILEPATH=/usr/lib/liblz4.so
+
+//Path to a file.
 RDMACM_INCLUDE:PATH=/usr/include
 
 //Path to a library.
 RDMACM_LIB:FILEPATH=/usr/lib/librdmacm.so
+
+//Path to a file.
+ZSTD_INCLUDE:PATH=/usr/include
+
+//Path to a library.
+ZSTD_LIB:FILEPATH=/usr/lib/libzstd.so
 
 //Value Computed by CMake
 gpushare_BINARY_DIR:STATIC=/home/spideyo0/gpushare/build

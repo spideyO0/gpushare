@@ -211,9 +211,11 @@ CMakeFiles/gpushare_client.dir/client/gpushare_client.cpp.o: \
  /usr/include/infiniband/verbs_api.h \
  /usr/include/infiniband/ib_user_ioctl_verbs.h \
  /usr/include/rdma/ib_user_verbs.h /usr/include/rdma/rdma_cma.h \
- /usr/include/infiniband/sa.h /usr/include/dlfcn.h \
- /usr/include/bits/dlfcn.h /usr/include/bits/dl_find_object.h \
- /usr/include/sys/mman.h /usr/include/bits/mman.h \
- /usr/include/bits/mman-map-flags-generic.h \
+ /usr/include/infiniband/sa.h \
+ /home/spideyo0/gpushare/include/gpushare/compression.h \
+ /usr/include/lz4.h /usr/include/zstd.h /usr/include/zstd_errors.h \
+ /usr/include/dlfcn.h /usr/include/bits/dlfcn.h \
+ /usr/include/bits/dl_find_object.h /usr/include/sys/mman.h \
+ /usr/include/bits/mman.h /usr/include/bits/mman-map-flags-generic.h \
  /usr/include/bits/mman-linux.h /usr/include/bits/mman-shared.h \
  /usr/include/bits/mman_ext.h

@@ -72,6 +72,7 @@
 #include "gpushare/protocol.h"
 #include "gpushare/cuda_defs.h"
 #include "gpushare/transport.h"
+#include "gpushare/compression.h"
 
 /* Platform-specific dynamic loading for local GPU passthrough */
 #ifndef _WIN32
@@ -1039,8 +1040,43 @@ GPUSHARE_EXPORT cudaError_t cudaMemcpy(void *dst, const void *src, size_t count,
             g_last_error = cudaMemcpy_h2d_chunked(dst, src, count, 0);
             return g_last_error;
         }
-        /* Standard single-message path with Phase 5 pinned staging */
+        /* Standard single-message path with Phase 5 pinned staging + Phase 10 compression */
         ensure_client_pinned();
+
+        /* Phase 10: Try compression if server supports it */
+        if ((g_server_caps & GS_CAP_COMPRESS) && gs_compression_available() &&
+            count >= GS_COMPRESS_MIN_SIZE) {
+            size_t comp_bound = gs_compress_bound(count);
+            size_t payload_size = sizeof(gs_memcpy_h2d_req_t) + comp_bound;
+            int pin_idx = -1;
+            void *payload_buf = g_client_pinned.acquire(payload_size, pin_idx);
+            if (payload_buf) {
+                auto *req = (gs_memcpy_h2d_req_t*)payload_buf;
+                req->device_ptr = ptr_to_handle(dst);
+                req->size = count;  /* original size — server needs this */
+                size_t compressed = gs_compress(src, count,
+                    (uint8_t*)payload_buf + sizeof(gs_memcpy_h2d_req_t), comp_bound);
+                if (compressed > 0) {
+                    /* Send compressed */
+                    size_t total = sizeof(gs_memcpy_h2d_req_t) + compressed;
+                    std::vector<uint8_t> resp;
+                    uint16_t flags = GS_FLAG_COMPRESSED;
+                    bool ok = rpc_call_flags(GS_OP_MEMCPY_H2D, flags, payload_buf,
+                                              (uint32_t)total, resp);
+                    g_client_pinned.release(payload_buf, pin_idx);
+                    if (!ok) return cudaErrorUnknown;
+                    if (resp.size() >= sizeof(gs_generic_resp_t))
+                        g_last_error = (cudaError_t)((const gs_generic_resp_t*)resp.data())->cuda_error;
+                    else
+                        g_last_error = cudaSuccess;
+                    return g_last_error;
+                }
+                g_client_pinned.release(payload_buf, pin_idx);
+                /* Compression didn't help — fall through to uncompressed */
+            }
+        }
+
+        /* Uncompressed path */
         size_t payload_size = sizeof(gs_memcpy_h2d_req_t) + count;
         int pin_idx = -1;
         void *payload_buf = g_client_pinned.acquire(payload_size, pin_idx);

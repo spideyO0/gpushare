@@ -779,13 +779,20 @@ echo -e "  Config:          $CONF_DIR/client.conf"
 if [[ "$NO_SYMLINKS" == false ]]; then
 echo -e "  CUDA override:   ${GREEN}ACTIVE${NC} (libcudart.so -> gpushare)"
 echo -e "  API coverage:    2600+ functions (cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSOLVER, cuRAND, NVRTC, nvJPEG)"
-echo -e "  Transfer opts:   ${GREEN}ACTIVE${NC} (tiered pinned pools, async memcpy, chunked pipelining, D2H prefetch, RDMA auto-detect)"
+echo -e "  Transfer opts:   ${GREEN}ACTIVE${NC} (tiered pinned pools, async memcpy, chunked pipelining, D2H prefetch, RDMA, LZ4/zstd)"
 if grep -q "^IBVERBS_LIB:FILEPATH=.*libibverbs" "$BUILD_DIR/CMakeCache.txt" 2>/dev/null; then
 echo -e "  RDMA transport:  ${GREEN}BUILT IN${NC} (rdma-core auto-detected)"
 elif [[ -f /usr/lib/libibverbs.so ]] || [[ -f /usr/lib64/libibverbs.so ]] || ldconfig -p 2>/dev/null | grep -q libibverbs; then
 echo -e "  RDMA transport:  ${GREEN}AVAILABLE${NC} (rebuild to enable)"
 else
 echo -e "  RDMA transport:  ${YELLOW}NOT AVAILABLE${NC} (install rdma-core for InfiniBand support)"
+fi
+if grep -q "^LZ4_LIB:FILEPATH=.*liblz4" "$BUILD_DIR/CMakeCache.txt" 2>/dev/null; then
+echo -e "  Compression:     ${GREEN}LZ4${NC} (auto-detected)"
+elif grep -q "^ZSTD_LIB:FILEPATH=.*libzstd" "$BUILD_DIR/CMakeCache.txt" 2>/dev/null; then
+echo -e "  Compression:     ${GREEN}zstd${NC} (auto-detected)"
+else
+echo -e "  Compression:     ${YELLOW}NOT AVAILABLE${NC} (install lz4 or zstd for transfer compression)"
 fi
 else
 echo -e "  CUDA override:   ${YELLOW}DISABLED${NC} (use LD_LIBRARY_PATH)"

@@ -260,4 +260,6 @@ CMakeFiles/gpushare-server.dir/server/server.cpp.o: \
  /usr/include/infiniband/verbs_api.h \
  /usr/include/infiniband/ib_user_ioctl_verbs.h \
  /usr/include/rdma/ib_user_verbs.h /usr/include/rdma/rdma_cma.h \
- /usr/include/infiniband/sa.h
+ /usr/include/infiniband/sa.h \
+ /home/spideyo0/gpushare/include/gpushare/compression.h \
+ /usr/include/lz4.h /usr/include/zstd.h /usr/include/zstd_errors.h

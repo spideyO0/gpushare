@@ -43,6 +43,7 @@ PACKED_STRUCT_BEGIN typedef struct ATTR_PACKED {
 #define GS_FLAG_ERROR       0x0002
 #define GS_FLAG_CHUNKED     0x0004
 #define GS_FLAG_LAST_CHUNK  0x0008
+#define GS_FLAG_COMPRESSED  0x0010
 
 /* ── Opcodes ─────────────────────────────────────────────── */
 enum gs_opcode {
@@ -123,8 +124,9 @@ PACKED_STRUCT_BEGIN typedef struct ATTR_PACKED {
     uint32_t capabilities;      /* bitmask of GS_CAP_* flags */
 } gs_init_resp_t; PACKED_STRUCT_END
 
-#define GS_CAP_ASYNC   0x01    /* server supports async memcpy opcodes */
-#define GS_CAP_CHUNKED 0x02    /* server supports chunked transfers */
+#define GS_CAP_ASYNC    0x01    /* server supports async memcpy opcodes */
+#define GS_CAP_CHUNKED  0x02    /* server supports chunked transfers */
+#define GS_CAP_COMPRESS 0x04    /* server supports compressed payloads */
 
 /* GS_OP_GET_DEVICE_COUNT response */
 PACKED_STRUCT_BEGIN typedef struct ATTR_PACKED {

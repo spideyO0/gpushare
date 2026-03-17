@@ -8,6 +8,8 @@ libgpushare_client.so.1.0.0: \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libpthread.a \
   /usr/lib/libibverbs.so \
   /usr/lib/librdmacm.so \
+  /usr/lib/liblz4.so \
+  /usr/lib/libzstd.so \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libstdc++.so \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libm.so \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libm.so \
@@ -50,6 +52,10 @@ CMakeFiles/gpushare_client.dir/client/generated_all_stubs.cpp.o:
 /usr/lib/libibverbs.so:
 
 /usr/lib/librdmacm.so:
+
+/usr/lib/liblz4.so:
+
+/usr/lib/libzstd.so:
 
 /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libstdc++.so:
 

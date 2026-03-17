@@ -11,6 +11,8 @@ gpushare-server: \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libdl.a \
   /usr/lib/libibverbs.so \
   /usr/lib/librdmacm.so \
+  /usr/lib/liblz4.so \
+  /usr/lib/libzstd.so \
   /usr/lib/librt.a \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libdl.a \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libstdc++.so \
@@ -72,6 +74,10 @@ CMakeFiles/gpushare-server.dir/server/generated_all_dispatch.cpp.o:
 /usr/lib/libibverbs.so:
 
 /usr/lib/librdmacm.so:
+
+/usr/lib/liblz4.so:
+
+/usr/lib/libzstd.so:
 
 /usr/lib/librt.a:
 

@@ -204,7 +204,7 @@ public:
 
 ---
 
-## Phase 10: Transfer Compression (planned)
+## Phase 10: Transfer Compression (done)
 
 **Gap:** rCUDA (2022 paper) adds pipelined compression as an additional pipeline stage. This reduces data volume over the network for compressible data (sparse tensors, zero-heavy buffers).
 
@@ -314,7 +314,7 @@ done     Phase 6: D2H Speculative Prefetch ────────── GPU pr
 done     Phase 7: Adaptive Buffer Sizing ──────────── rCUDA's configurable tiered pools
 done     Phase 8: Network Transport Abstraction ───── prerequisite for RDMA
 done     Phase 9: InfiniBand / RDMA Transport ─────── rCUDA's key advantage (97.7% wire speed)
-planned  Phase 10: Transfer Compression ────────────── rCUDA 2022 pipelined compression
+done     Phase 10: Transfer Compression ────────────── LZ4/zstd auto-detected, ratio threshold
 planned  Phase 11: Multi-Server GPU Pooling ────────── rCUDA's multi-node GPU sharing
            │
 research Phase 12: GPU Context Scheduling ──────────── multi-tenant fairness
@@ -337,7 +337,7 @@ research Phase 13: GPUDirect RDMA ───────────────�
 | Network abstraction | Modular (runtime) | Yes (Phase 8) | Yes |
 | InfiniBand Verbs | Yes (97.7% wire) | Yes (Phase 9, optional) | Yes |
 | GPUDirect RDMA | Yes | No | Phase 13 |
-| Transfer compression | Yes (2022) | No | Phase 10 |
+| Transfer compression | Yes (2022) | Yes (Phase 10, LZ4/zstd) | Yes |
 | Multi-server pooling | Yes | No | Phase 11 |
 | GPU scheduling | Yes | No | Phase 12 |
 | Cross-platform client | No (Linux only) | Yes (Linux/macOS/Win) | Yes |
