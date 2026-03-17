@@ -75,6 +75,7 @@
 /* Platform-specific dynamic loading for local GPU passthrough */
 #ifndef _WIN32
   #include <dlfcn.h>
+  #include <sys/mman.h>   /* mmap, munmap, mlock, munlock (Phase 5 pinned pool) */
 #endif
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -297,6 +298,95 @@ static void init_local_gpu() {
 #else  /* _WIN32 */
 static void init_local_gpu() { /* Not yet implemented on Windows */ }
 #endif
+
+/* ── Phase 5: Client-side pinned buffer pool ─────────────── */
+/* Completes rCUDA's three-stage pipeline: app memory -> client pinned buffer
+ * -> network -> server pinned buffer -> GPU. Page-locked memory allows the
+ * OS to DMA directly from the buffer to the NIC, bypassing the kernel's
+ * pageable staging copy. Can't use cudaMallocHost (no CUDA on client). */
+#define CLIENT_PINNED_COUNT  4
+#define CLIENT_PINNED_SIZE   (4 * 1024 * 1024)  /* 4 MB each */
+
+struct ClientPinnedPool {
+    void *buffers[CLIENT_PINNED_COUNT] = {};
+    bool  in_use[CLIENT_PINNED_COUNT]  = {};
+    bool  is_locked[CLIENT_PINNED_COUNT] = {};
+    std::mutex mtx;
+    bool initialized = false;
+
+    void init() {
+        for (int i = 0; i < CLIENT_PINNED_COUNT; i++) {
+#ifdef _WIN32
+            buffers[i] = VirtualAlloc(NULL, CLIENT_PINNED_SIZE,
+                                       MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            if (buffers[i]) {
+                is_locked[i] = (VirtualLock(buffers[i], CLIENT_PINNED_SIZE) != 0);
+            }
+#else
+            buffers[i] = mmap(NULL, CLIENT_PINNED_SIZE, PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (buffers[i] == MAP_FAILED) {
+                buffers[i] = nullptr;
+            } else {
+                is_locked[i] = (mlock(buffers[i], CLIENT_PINNED_SIZE) == 0);
+            }
+#endif
+            if (!buffers[i]) {
+                buffers[i] = malloc(CLIENT_PINNED_SIZE);
+                is_locked[i] = false;
+            }
+        }
+        initialized = true;
+    }
+
+    void destroy() {
+        for (int i = 0; i < CLIENT_PINNED_COUNT; i++) {
+            if (!buffers[i]) continue;
+#ifdef _WIN32
+            if (is_locked[i]) VirtualUnlock(buffers[i], CLIENT_PINNED_SIZE);
+            VirtualFree(buffers[i], 0, MEM_RELEASE);
+#else
+            if (is_locked[i]) munlock(buffers[i], CLIENT_PINNED_SIZE);
+            munmap(buffers[i], CLIENT_PINNED_SIZE);
+#endif
+            buffers[i] = nullptr;
+        }
+        initialized = false;
+    }
+
+    void *acquire(size_t size, int &index) {
+        std::lock_guard<std::mutex> lock(mtx);
+        if (size <= CLIENT_PINNED_SIZE) {
+            for (int i = 0; i < CLIENT_PINNED_COUNT; i++) {
+                if (!in_use[i] && buffers[i]) {
+                    in_use[i] = true;
+                    index = i;
+                    return buffers[i];
+                }
+            }
+        }
+        index = -1;
+        return malloc(size);
+    }
+
+    void release(void *buf, int index) {
+        if (index >= 0 && index < CLIENT_PINNED_COUNT) {
+            std::lock_guard<std::mutex> lock(mtx);
+            in_use[index] = false;
+        } else {
+            free(buf);
+        }
+    }
+};
+
+static ClientPinnedPool g_client_pinned;
+static bool g_client_pinned_initialized = false;
+
+static void ensure_client_pinned() {
+    if (g_client_pinned_initialized) return;
+    g_client_pinned.init();
+    g_client_pinned_initialized = true;
+}
 
 /* ── Logging ─────────────────────────────────────────────── */
 static int g_verbose = 0;
@@ -608,6 +698,9 @@ static bool ensure_connected() {
     /* Phase 4: Start dedicated recv thread for pipelined requests */
     start_recv_thread();
 
+    /* Phase 5: Initialize client-side pinned buffer pool */
+    ensure_client_pinned();
+
     return true;
 }
 
@@ -843,29 +936,38 @@ GPUSHARE_EXPORT cudaError_t cudaFree(void *devPtr) {
     return (cudaError_t)rpc_simple(GS_OP_FREE, &req, sizeof(req));
 }
 
-/* Phase 3: Chunked H2D transfer — sends 4MB chunks, each ACK'd by server */
+/* Phase 3+5: Chunked H2D transfer — sends 4MB chunks with pinned staging */
 static cudaError_t cudaMemcpy_h2d_chunked(void *dst, const void *src, size_t count,
                                            uint64_t stream_handle) {
     const uint8_t *data = (const uint8_t*)src;
     uint64_t dev_ptr = ptr_to_handle(dst);
     uint64_t offset = 0;
 
+    ensure_client_pinned();
+
     while (offset < count) {
         uint32_t chunk_size = (uint32_t)std::min((uint64_t)GS_CHUNK_SIZE, count - offset);
+        size_t payload_size = sizeof(gs_memcpy_h2d_chunk_t) + chunk_size;
 
-        std::vector<uint8_t> payload(sizeof(gs_memcpy_h2d_chunk_t) + chunk_size);
-        auto *chunk = (gs_memcpy_h2d_chunk_t*)payload.data();
+        /* Phase 5: Use pinned buffer for the send payload */
+        int pin_idx = -1;
+        void *payload_buf = g_client_pinned.acquire(payload_size, pin_idx);
+        if (!payload_buf) return cudaErrorMemoryAllocation;
+
+        auto *chunk = (gs_memcpy_h2d_chunk_t*)payload_buf;
         chunk->device_ptr = dev_ptr;
         chunk->total_size = count;
         chunk->chunk_offset = offset;
         chunk->chunk_size = chunk_size;
         chunk->stream_handle = stream_handle;
-        memcpy(payload.data() + sizeof(gs_memcpy_h2d_chunk_t), data + offset, chunk_size);
+        memcpy((uint8_t*)payload_buf + sizeof(gs_memcpy_h2d_chunk_t), data + offset, chunk_size);
 
         std::vector<uint8_t> resp;
-        if (!rpc_call_flags(GS_OP_MEMCPY_H2D, GS_FLAG_CHUNKED, payload.data(),
-                            (uint32_t)payload.size(), resp))
-            return cudaErrorUnknown;
+        bool ok = rpc_call_flags(GS_OP_MEMCPY_H2D, GS_FLAG_CHUNKED, payload_buf,
+                                  (uint32_t)payload_size, resp);
+        g_client_pinned.release(payload_buf, pin_idx);
+
+        if (!ok) return cudaErrorUnknown;
         if (resp.size() >= sizeof(gs_generic_resp_t)) {
             int32_t err = ((const gs_generic_resp_t*)resp.data())->cuda_error;
             if (err != 0) return (cudaError_t)err;
@@ -875,7 +977,7 @@ static cudaError_t cudaMemcpy_h2d_chunked(void *dst, const void *src, size_t cou
     return cudaSuccess;
 }
 
-/* Phase 3: Chunked D2H transfer — requests chunks, receives them in order */
+/* Phase 3: Chunked D2H transfer — per-chunk requests (fallback for old servers) */
 static cudaError_t cudaMemcpy_d2h_chunked(void *dst, const void *src, size_t count,
                                            uint64_t stream_handle) {
     uint8_t *out = (uint8_t*)dst;
@@ -907,6 +1009,7 @@ static cudaError_t cudaMemcpy_d2h_chunked(void *dst, const void *src, size_t cou
     return cudaSuccess;
 }
 
+
 GPUSHARE_EXPORT cudaError_t cudaMemcpy(void *dst, const void *src, size_t count, cudaMemcpyKind kind) {
     TRACE("cudaMemcpy(%zu bytes, kind=%d)", count, kind);
     if (g_local.available && !is_remote_device(g_active_device) && g_local.Memcpy)
@@ -918,13 +1021,18 @@ GPUSHARE_EXPORT cudaError_t cudaMemcpy(void *dst, const void *src, size_t count,
             g_last_error = cudaMemcpy_h2d_chunked(dst, src, count, 0);
             return g_last_error;
         }
-        /* Standard single-message path */
-        std::vector<uint8_t> payload(sizeof(gs_memcpy_h2d_req_t) + count);
-        auto *req = (gs_memcpy_h2d_req_t*)payload.data();
+        /* Standard single-message path with Phase 5 pinned staging */
+        ensure_client_pinned();
+        size_t payload_size = sizeof(gs_memcpy_h2d_req_t) + count;
+        int pin_idx = -1;
+        void *payload_buf = g_client_pinned.acquire(payload_size, pin_idx);
+        if (!payload_buf) return cudaErrorMemoryAllocation;
+        auto *req = (gs_memcpy_h2d_req_t*)payload_buf;
         req->device_ptr = ptr_to_handle(dst);
         req->size = count;
-        memcpy(payload.data() + sizeof(gs_memcpy_h2d_req_t), src, count);
-        g_last_error = (cudaError_t)rpc_simple(GS_OP_MEMCPY_H2D, payload.data(), payload.size());
+        memcpy((uint8_t*)payload_buf + sizeof(gs_memcpy_h2d_req_t), src, count);
+        g_last_error = (cudaError_t)rpc_simple(GS_OP_MEMCPY_H2D, payload_buf, payload_size);
+        g_client_pinned.release(payload_buf, pin_idx);
         return g_last_error;
 
     } else if (kind == cudaMemcpyDeviceToHost) {
@@ -1984,6 +2092,11 @@ static void GPUSHARE_DESTRUCTOR gpushare_cleanup(void) {
         g_pending.clear();
     }
     g_server_caps = 0;
+    /* Phase 5: Clean up client-side pinned pool */
+    if (g_client_pinned_initialized) {
+        g_client_pinned.destroy();
+        g_client_pinned_initialized = false;
+    }
 #ifndef _WIN32
     /* Clean up local GPU library handles */
     if (g_local.NvmlShutdown) g_local.NvmlShutdown();
@@ -2030,6 +2143,10 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
             g_pending.clear();
         }
         g_server_caps = 0;
+        if (g_client_pinned_initialized) {
+            g_client_pinned.destroy();
+            g_client_pinned_initialized = false;
+        }
     }
     return TRUE;
 }

@@ -726,7 +726,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 $SHARE_DIR/dashboard/app.py --config $CONF_DIR/client.conf
+ExecStart=/usr/bin/python3 $SHARE_DIR/dashboard/app.py --client --config $CONF_DIR/client.conf
 Restart=on-failure
 RestartSec=5
 
@@ -779,7 +779,7 @@ echo -e "  Config:          $CONF_DIR/client.conf"
 if [[ "$NO_SYMLINKS" == false ]]; then
 echo -e "  CUDA override:   ${GREEN}ACTIVE${NC} (libcudart.so -> gpushare)"
 echo -e "  API coverage:    2600+ functions (cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSOLVER, cuRAND, NVRTC, nvJPEG)"
-echo -e "  Transfer opts:   ${GREEN}ACTIVE${NC} (pinned buffers, async memcpy, chunked pipelining)"
+echo -e "  Transfer opts:   ${GREEN}ACTIVE${NC} (pinned staging, async memcpy, chunked pipelining, D2H prefetch)"
 else
 echo -e "  CUDA override:   ${YELLOW}DISABLED${NC} (use LD_LIBRARY_PATH)"
 fi

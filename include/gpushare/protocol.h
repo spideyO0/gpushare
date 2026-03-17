@@ -65,6 +65,7 @@ enum gs_opcode {
     GS_OP_MEMSET            = 0x0025,
     GS_OP_MEMCPY_H2D_ASYNC = 0x0026,  /* async host→device with stream */
     GS_OP_MEMCPY_D2H_ASYNC = 0x0027,  /* async device→host with stream */
+    GS_OP_MEMCPY_D2H_BULK  = 0x0028,  /* reserved for future bulk D2H streaming */
 
     /* Kernel execution */
     GS_OP_MODULE_LOAD       = 0x0030,  /* load PTX / cubin */
@@ -229,6 +230,14 @@ PACKED_STRUCT_BEGIN typedef struct ATTR_PACKED {
     uint32_t chunk_size;
     uint64_t stream_handle;
 } gs_memcpy_d2h_chunk_t; PACKED_STRUCT_END
+
+/* GS_OP_MEMCPY_D2H_BULK request — server streams back all chunks with
+ * double-buffered GPU DMA overlapping network sends */
+PACKED_STRUCT_BEGIN typedef struct ATTR_PACKED {
+    uint64_t device_ptr;
+    uint64_t size;
+    uint64_t stream_handle;
+} gs_memcpy_d2h_bulk_req_t; PACKED_STRUCT_END
 
 /* Chunk size for pipelined transfers */
 #define GS_CHUNK_SIZE        (4 * 1024 * 1024)  /* 4 MB */

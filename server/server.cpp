@@ -233,6 +233,18 @@ struct ClientSession {
     /* Pending async transfers (Phase 2) */
     std::vector<PendingTransfer> pending_transfers;
 
+    /* Phase 6: D2H prefetch — when processing chunk N, speculatively start
+     * GPU DMA for chunk N+1 so it's ready when the next request arrives. */
+    struct D2hPrefetch {
+        uint64_t device_ptr = 0;   /* base device pointer of the transfer */
+        uint64_t next_offset = 0;  /* offset of the prefetched chunk */
+        uint32_t next_size = 0;    /* size of prefetched chunk */
+        void *buf = nullptr;       /* pinned buffer holding prefetched data */
+        int pool_idx = -1;
+        cudaEvent_t event = nullptr;
+        bool valid = false;
+    } d2h_prefetch;
+
     ClientSession(int fd_, uint32_t sid, const char *addr, NetType nt)
         : fd(fd_), session_id(sid), net_type(nt) {
         strncpy(addr_str, addr, sizeof(addr_str) - 1);
@@ -263,6 +275,16 @@ struct ClientSession {
     }
 
     void cleanup_resources() {
+        /* Release D2H prefetch if active */
+        if (d2h_prefetch.valid) {
+            if (d2h_prefetch.event) {
+                cudaEventSynchronize(d2h_prefetch.event);
+                cudaEventDestroy(d2h_prefetch.event);
+            }
+            pinned_pool.release(d2h_prefetch.buf, d2h_prefetch.pool_idx);
+            d2h_prefetch.valid = false;
+        }
+
         /* Wait for and release all pending async transfers */
         for (auto &pt : pending_transfers) {
             cudaEventSynchronize(pt.completion_event);
@@ -647,49 +669,98 @@ static bool handle_memcpy_h2d_chunked(ClientSession *s, const gs_header_t *hdr, 
     return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaSuccess);
 }
 
+/* Phase 6: Per-chunk D2H with speculative prefetch.
+ * When processing chunk N, if there's a next chunk, start GPU DMA for it
+ * into a second pinned buffer. When the client sends the request for chunk N+1,
+ * the data is already in host memory — zero GPU wait. */
 static bool handle_memcpy_d2h_chunked(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
     auto *chunk = (const gs_memcpy_d2h_chunk_t*)payload;
-    void *src = (void*)(uintptr_t)(chunk->device_ptr + chunk->chunk_offset);
+    uint64_t dev_base = chunk->device_ptr;
+    uint64_t cur_offset = chunk->chunk_offset;
     cudaStream_t stream = (cudaStream_t)(uintptr_t)chunk->stream_handle;
     uint32_t csize = chunk->chunk_size;
 
     s->reap_pending_transfers();
 
-    /* Double-buffer: acquire two pinned buffers for pipelining.
-     * For the single-chunk case this still works fine — we just use buf_a. */
-    int idx_a = -1;
-    void *buf_a = s->pinned_pool.acquire(csize, idx_a);
-    if (!buf_a) return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
+    void *send_buf = nullptr;
+    int send_idx = -1;
 
-    /* Copy chunk from device using stream, then wait */
-    cudaError_t err = cudaMemcpyAsync(buf_a, src, csize, cudaMemcpyDeviceToHost, stream);
-    if (err == cudaSuccess) err = cudaStreamSynchronize(stream);
+    /* Check if we have a prefetch hit for this exact chunk */
+    if (s->d2h_prefetch.valid &&
+        s->d2h_prefetch.device_ptr == dev_base &&
+        s->d2h_prefetch.next_offset == cur_offset &&
+        s->d2h_prefetch.next_size == csize) {
+        /* Prefetch hit! Wait for GPU copy to finish, then use the buffer */
+        cudaEventSynchronize(s->d2h_prefetch.event);
+        cudaEventDestroy(s->d2h_prefetch.event);
+        send_buf = s->d2h_prefetch.buf;
+        send_idx = s->d2h_prefetch.pool_idx;
+        s->d2h_prefetch.valid = false;
+        LOG_DBG("Session %u: D2H prefetch HIT offset=%lu", s->session_id, (unsigned long)cur_offset);
+    } else {
+        /* Prefetch miss — release stale prefetch if any */
+        if (s->d2h_prefetch.valid) {
+            cudaEventSynchronize(s->d2h_prefetch.event);
+            cudaEventDestroy(s->d2h_prefetch.event);
+            s->pinned_pool.release(s->d2h_prefetch.buf, s->d2h_prefetch.pool_idx);
+            s->d2h_prefetch.valid = false;
+        }
+        /* Copy this chunk synchronously */
+        send_buf = s->pinned_pool.acquire(csize, send_idx);
+        if (!send_buf) return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
 
-    if (err != cudaSuccess) {
-        s->pinned_pool.release(buf_a, idx_a);
-        return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+        void *src = (void*)(uintptr_t)(dev_base + cur_offset);
+        cudaError_t err = cudaMemcpyAsync(send_buf, src, csize, cudaMemcpyDeviceToHost, stream);
+        if (err == cudaSuccess) err = cudaStreamSynchronize(stream);
+        if (err != cudaSuccess) {
+            s->pinned_pool.release(send_buf, send_idx);
+            return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+        }
     }
 
-    /* Send chunk response */
+    /* Speculatively prefetch the next chunk while we send this one */
+    uint64_t next_offset = cur_offset + csize;
+    if (next_offset < chunk->total_size) {
+        uint32_t next_size = (uint32_t)std::min((uint64_t)PINNED_BUF_SIZE,
+                                                 chunk->total_size - next_offset);
+        int pf_idx = -1;
+        void *pf_buf = s->pinned_pool.acquire(next_size, pf_idx);
+        if (pf_buf) {
+            cudaEvent_t pf_ev = nullptr;
+            if (cudaEventCreate(&pf_ev) == cudaSuccess) {
+                void *pf_src = (void*)(uintptr_t)(dev_base + next_offset);
+                cudaMemcpyAsync(pf_buf, pf_src, next_size, cudaMemcpyDeviceToHost, stream);
+                cudaEventRecord(pf_ev, stream);
+                s->d2h_prefetch.device_ptr = dev_base;
+                s->d2h_prefetch.next_offset = next_offset;
+                s->d2h_prefetch.next_size = next_size;
+                s->d2h_prefetch.buf = pf_buf;
+                s->d2h_prefetch.pool_idx = pf_idx;
+                s->d2h_prefetch.event = pf_ev;
+                s->d2h_prefetch.valid = true;
+            } else {
+                s->pinned_pool.release(pf_buf, pf_idx);
+            }
+        }
+    }
+
+    /* Send current chunk over network (while GPU prefetches next chunk) */
     uint32_t payload_len = sizeof(int32_t) + csize;
     uint32_t total = GPUSHARE_HEADER_SIZE + payload_len;
     gs_header_t resp_hdr;
     gs_header_init(&resp_hdr, hdr->opcode, hdr->req_id, total);
     resp_hdr.flags = GS_FLAG_RESPONSE | GS_FLAG_CHUNKED;
-    if (chunk->chunk_offset + csize >= chunk->total_size)
+    if (next_offset >= chunk->total_size)
         resp_hdr.flags |= GS_FLAG_LAST_CHUNK;
 
     int32_t cuda_err = 0;
     bool ok = send_all(s->fd, &resp_hdr, sizeof(resp_hdr))
            && send_all(s->fd, &cuda_err, sizeof(cuda_err))
-           && send_all(s->fd, buf_a, csize);
+           && send_all(s->fd, send_buf, csize);
 
-    s->pinned_pool.release(buf_a, idx_a);
+    s->pinned_pool.release(send_buf, send_idx);
     if (!ok) return false;
     s->track_op(0, csize);
-    LOG_DBG("Session %u: D2H chunk offset=%lu size=%u (total=%lu)",
-            s->session_id, (unsigned long)chunk->chunk_offset,
-            csize, (unsigned long)chunk->total_size);
     return true;
 }
 

@@ -69,7 +69,7 @@ These phases were implemented as the initial rCUDA-parity push.
 
 ---
 
-## Phase 5: Client-Side Pinned Buffer Staging (next)
+## Phase 5: Client-Side Pinned Buffer Staging (done)
 
 **Gap:** rCUDA uses a three-stage pipeline: app memory -> client pinned buffer -> network -> server pinned buffer -> GPU. gpushare currently only has the server half. The client builds a `std::vector` for H2D and sends pageable data directly into the TCP stack.
 
@@ -91,7 +91,7 @@ These phases were implemented as the initial rCUDA-parity push.
 
 ---
 
-## Phase 6: Double-Buffered D2H Pipelining (next)
+## Phase 6: D2H Speculative Prefetch (done)
 
 **Gap:** Current D2H chunked handler does: GPU copy chunk -> wait -> send -> next chunk. No overlap between GPU DMA and network send.
 
@@ -308,8 +308,8 @@ done     Phase 2: Server Async Memcpy
 done     Phase 3: Chunked Transfer Pipelining
 done     Phase 4: Client Request Pipelining
            │
-next     Phase 5: Client-Side Pinned Staging ──────── completes rCUDA three-stage pipeline
-next     Phase 6: Double-Buffered D2H ────────────── overlap GPU DMA with network send
+done     Phase 5: Client-Side Pinned Staging ──────── completes rCUDA three-stage pipeline
+done     Phase 6: D2H Speculative Prefetch ────────── GPU prefetches next chunk while sending current
            │
 planned  Phase 7: Adaptive Buffer Sizing ──────────── rCUDA's configurable tiered pools
 planned  Phase 8: Network Transport Abstraction ───── prerequisite for RDMA
@@ -327,12 +327,12 @@ research Phase 13: GPUDirect RDMA ───────────────�
 
 | Feature | rCUDA | gpushare (current) | gpushare (after roadmap) |
 |---------|-------|--------------------|--------------------------|
-| Client pinned staging | Yes (three-stage) | No | Phase 5 |
+| Client pinned staging | Yes (three-stage) | Yes (Phase 5) | Yes |
 | Server pinned staging | Yes | Yes (Phase 1) | Yes |
 | Async memcpy | Yes | Yes (Phase 2) | Yes |
 | Chunked pipelining | Yes | Yes (Phase 3) | Yes |
 | Client request pipelining | Yes | Yes (Phase 4) | Yes |
-| Double-buffered D2H | Yes | No | Phase 6 |
+| D2H prefetch/overlap | Yes | Yes (Phase 6) | Yes |
 | Adaptive buffer sizing | Yes (per size range) | No (fixed 4x4MB) | Phase 7 |
 | InfiniBand Verbs | Yes (97.7% wire) | No | Phase 9 |
 | GPUDirect RDMA | Yes | No | Phase 13 |

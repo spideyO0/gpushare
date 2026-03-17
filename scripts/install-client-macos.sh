@@ -339,6 +339,7 @@ PLIST_CONTENT="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
     <array>
         <string>/usr/bin/python3</string>
         <string>${SHARE_DIR}/dashboard/app.py</string>
+        <string>--client</string>
         <string>--config</string>
         <string>${CONF_DIR}/client.conf</string>
     </array>
@@ -398,7 +399,7 @@ echo -e "  Library:         $LIB_DIR/libgpushare_client.dylib"
 echo -e "  Config:          $CONF_DIR/client.conf"
 echo -e "  CUDA override:   ${GREEN}ACTIVE${NC} (libcudart.dylib -> gpushare)"
 echo -e "  API coverage:    2600+ functions (cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSOLVER, cuRAND, NVRTC, nvJPEG)"
-echo -e "  Transfer opts:   ${GREEN}ACTIVE${NC} (pinned buffers, async memcpy, chunked pipelining)"
+echo -e "  Transfer opts:   ${GREEN}ACTIVE${NC} (pinned staging, async memcpy, chunked pipelining, D2H prefetch)"
 echo
 echo -e "  ${BOLD}Usage — CUDA programs work transparently:${NC}"
 echo -e "    python3 my_training.py        ${CYAN}# uses remote GPU${NC}"
