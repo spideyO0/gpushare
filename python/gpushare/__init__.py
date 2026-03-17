@@ -319,6 +319,31 @@ class RemoteGPU:
                 f"  SMs: {props['multi_processor_count']}\n"
                 f"  Max threads/block: {props['max_threads_per_block']}")
 
+    def list_all_gpus(self) -> list:
+        """List all available GPUs (local + remote) with properties.
+
+        Returns a list of dicts, each with 'index', 'name', 'type' ('local'/'remote'),
+        and full device properties.
+        """
+        gpus = []
+        count = self.device_count()
+        for i in range(count):
+            props = self.device_properties(i)
+            name = props['name']
+            gpu_type = 'remote'
+            if '(local)' in name:
+                gpu_type = 'local'
+                name = name.replace(' (local)', '')
+            elif '(remote)' in name:
+                name = name.replace(' (remote)', '')
+            gpus.append({
+                'index': i,
+                'name': name,
+                'type': gpu_type,
+                **props,
+            })
+        return gpus
+
 
 def _read_server_from_config() -> Optional[str]:
     """Read server address from config files."""

@@ -135,6 +135,7 @@ grep -Pn '[^\x00-\x7F]' scripts/install-client-windows.ps1 scripts/uninstall-win
 - **Config file over env vars**: Env vars don't persist across sessions and break in venvs. Config files at well-known paths work everywhere.
 - **LAN/WAN auto-detect**: Server checks client IP against local interface subnets. No user configuration needed.
 - **Per-client thread model**: Simple, each client gets full CUDA context. Trade-off: more memory per client, but simpler than async multiplexing.
+- **Local GPU passthrough**: When a local NVIDIA GPU exists, the client detects it via dlopen of real CUDA libraries from `/usr/local/lib/gpushare/real/` (backed up by install script). Both local and remote GPUs are presented to applications. Device 0..N-1 are local, device N+ are remote. `cudaSetDevice()` routes all subsequent calls. Config: `gpu_mode=all|remote|local` in client.conf, or `GPUSHARE_GPU_MODE` env var. Requires `RTLD_DEEPBIND` to prevent symbol conflicts.
 
 ## File layout
 

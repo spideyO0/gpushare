@@ -48,6 +48,9 @@ if(BUILD_CLIENT)
     # Don't link against CUDA — that's the whole point
     if(WIN32)
         target_link_libraries(gpushare_client PRIVATE ws2_32)
+    else()
+        # dl is needed for dlopen/dlsym (local GPU passthrough)
+        target_link_libraries(gpushare_client PRIVATE dl)
     endif()
 
     # Export CUDA symbols so LD_PRELOAD / DYLD_INSERT_LIBRARIES works

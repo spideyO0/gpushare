@@ -375,13 +375,14 @@ if command -v nvcc >/dev/null 2>&1 || [[ -d /usr/local/cuda ]] || [[ -d /opt/cud
     echo -e "${YELLOW}║  WARNING: Local CUDA installation detected!          ║${NC}"
     echo -e "${YELLOW}║                                                      ║${NC}"
     echo -e "${YELLOW}║  gpushare installs libcudart symlinks that override  ║${NC}"
-    echo -e "${YELLOW}║  the real CUDA runtime. If you need local GPU too,   ║${NC}"
-    echo -e "${YELLOW}║  use --no-symlinks and set LD_LIBRARY_PATH manually. ║${NC}"
+    echo -e "${YELLOW}║  the real CUDA runtime. Real CUDA libraries will be  ║${NC}"
+    echo -e "${YELLOW}║  backed up so both local and remote GPUs can be used.║${NC}"
     echo -e "${YELLOW}╚══════════════════════════════════════════════════════╝${NC}"
     echo
+    HAS_LOCAL_CUDA=true
     if [[ "$NO_SYMLINKS" == false ]] && [[ "$IS_UPGRADE" == false ]]; then
-        read -rp "Continue and override local CUDA? [y/N] " answer
-        if [[ "${answer,,}" != "y" ]]; then
+        read -rp "Continue? Real CUDA libs will be backed up for dual-GPU support. [Y/n] " answer
+        if [[ "${answer,,}" == "n" ]]; then
             info "Aborting. Re-run with --no-symlinks to install without overriding CUDA."
             exit 0
         fi
@@ -451,6 +452,56 @@ else
     install -Dm755 "$BUILD_DIR/libgpushare_client.so" "$LIB_DIR/libgpushare_client.so"
     LIB_UPDATED=true
     ok "Installed $LIB_DIR/libgpushare_client.so"
+fi
+
+# ── 3b. Backup real CUDA libraries for local GPU passthrough ─────────────────
+REAL_CUDA_BACKUP="$LIB_DIR/real"
+if [[ "${HAS_LOCAL_CUDA:-false}" == true ]] && [[ "$NO_SYMLINKS" == false ]]; then
+    info "Backing up real CUDA libraries for dual-GPU support..."
+    mkdir -p "$REAL_CUDA_BACKUP"
+
+    # Search for real CUDA libraries in standard paths
+    CUDA_SEARCH_PATHS=(
+        /usr/lib/x86_64-linux-gnu
+        /usr/lib64
+        /usr/lib
+        /usr/local/cuda/lib64
+        /opt/cuda/lib64
+        /opt/cuda/lib
+    )
+
+    backup_lib() {
+        local libname="$1"
+        # Skip if already backed up
+        if [[ -f "$REAL_CUDA_BACKUP/$libname" ]]; then
+            return
+        fi
+        for dir in "${CUDA_SEARCH_PATHS[@]}"; do
+            local src="$dir/$libname"
+            # Follow symlinks to find the real file
+            if [[ -e "$src" ]]; then
+                local real_path
+                real_path=$(readlink -f "$src" 2>/dev/null || echo "$src")
+                if [[ -f "$real_path" ]] && [[ "$real_path" != *gpushare* ]]; then
+                    cp "$real_path" "$REAL_CUDA_BACKUP/$libname"
+                    ok "Backed up $libname from $real_path"
+                    return
+                fi
+            fi
+        done
+    }
+
+    backup_lib "libcudart.so"
+    backup_lib "libcuda.so.1"
+    backup_lib "libnvidia-ml.so.1"
+
+    if [[ -f "$REAL_CUDA_BACKUP/libcudart.so" ]] && [[ -f "$REAL_CUDA_BACKUP/libcuda.so.1" ]]; then
+        ok "Real CUDA libraries backed up to $REAL_CUDA_BACKUP"
+        info "Both local and remote GPUs will be available (gpu_mode=all)"
+    else
+        warn "Could not find all real CUDA libraries to backup"
+        warn "Only remote GPU will be available"
+    fi
 fi
 
 # ── 4. Create CUDA symlinks (transparent replacement) ────────────────────────
