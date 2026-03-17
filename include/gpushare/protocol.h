@@ -39,8 +39,10 @@ PACKED_STRUCT_BEGIN typedef struct ATTR_PACKED {
     uint16_t flags;
 } gs_header_t; PACKED_STRUCT_END
 
-#define GS_FLAG_RESPONSE  0x0001
-#define GS_FLAG_ERROR     0x0002
+#define GS_FLAG_RESPONSE    0x0001
+#define GS_FLAG_ERROR       0x0002
+#define GS_FLAG_CHUNKED     0x0004
+#define GS_FLAG_LAST_CHUNK  0x0008
 
 /* ── Opcodes ─────────────────────────────────────────────── */
 enum gs_opcode {
@@ -61,6 +63,8 @@ enum gs_opcode {
     GS_OP_MEMCPY_D2H       = 0x0023,  /* device→host: response has data */
     GS_OP_MEMCPY_D2D       = 0x0024,
     GS_OP_MEMSET            = 0x0025,
+    GS_OP_MEMCPY_H2D_ASYNC = 0x0026,  /* async host→device with stream */
+    GS_OP_MEMCPY_D2H_ASYNC = 0x0027,  /* async device→host with stream */
 
     /* Kernel execution */
     GS_OP_MODULE_LOAD       = 0x0030,  /* load PTX / cubin */
@@ -108,12 +112,18 @@ PACKED_STRUCT_BEGIN typedef struct ATTR_PACKED {
     uint32_t client_type;  /* 0=native, 1=python */
 } gs_init_req_t; PACKED_STRUCT_END
 
-/* GS_OP_INIT response */
+/* GS_OP_INIT response
+ * Backward-compatible: old clients read only the first 12 bytes.
+ * New clients check if payload >= 16 bytes to read capabilities. */
 PACKED_STRUCT_BEGIN typedef struct ATTR_PACKED {
     uint32_t version;
     uint32_t session_id;
     uint32_t max_transfer_size;
+    uint32_t capabilities;      /* bitmask of GS_CAP_* flags */
 } gs_init_resp_t; PACKED_STRUCT_END
+
+#define GS_CAP_ASYNC   0x01    /* server supports async memcpy opcodes */
+#define GS_CAP_CHUNKED 0x02    /* server supports chunked transfers */
 
 /* GS_OP_GET_DEVICE_COUNT response */
 PACKED_STRUCT_BEGIN typedef struct ATTR_PACKED {
@@ -186,6 +196,43 @@ PACKED_STRUCT_BEGIN typedef struct ATTR_PACKED {
     uint64_t src_ptr;
     uint64_t size;
 } gs_memcpy_d2d_req_t; PACKED_STRUCT_END
+
+/* GS_OP_MEMCPY_H2D_ASYNC request: like H2D but with stream handle */
+PACKED_STRUCT_BEGIN typedef struct ATTR_PACKED {
+    uint64_t device_ptr;
+    uint64_t size;
+    uint64_t stream_handle;
+    /* followed by `size` bytes of host data */
+} gs_memcpy_h2d_async_req_t; PACKED_STRUCT_END
+
+/* GS_OP_MEMCPY_D2H_ASYNC request */
+PACKED_STRUCT_BEGIN typedef struct ATTR_PACKED {
+    uint64_t device_ptr;
+    uint64_t size;
+    uint64_t stream_handle;
+} gs_memcpy_d2h_async_req_t; PACKED_STRUCT_END
+
+/* Chunked transfer headers (used with GS_FLAG_CHUNKED on H2D/D2H opcodes) */
+PACKED_STRUCT_BEGIN typedef struct ATTR_PACKED {
+    uint64_t device_ptr;
+    uint64_t total_size;
+    uint64_t chunk_offset;
+    uint32_t chunk_size;
+    uint64_t stream_handle;
+    /* followed by `chunk_size` bytes of host data */
+} gs_memcpy_h2d_chunk_t; PACKED_STRUCT_END
+
+PACKED_STRUCT_BEGIN typedef struct ATTR_PACKED {
+    uint64_t device_ptr;
+    uint64_t total_size;
+    uint64_t chunk_offset;
+    uint32_t chunk_size;
+    uint64_t stream_handle;
+} gs_memcpy_d2h_chunk_t; PACKED_STRUCT_END
+
+/* Chunk size for pipelined transfers */
+#define GS_CHUNK_SIZE        (4 * 1024 * 1024)  /* 4 MB */
+#define GS_CHUNK_THRESHOLD   GS_CHUNK_SIZE       /* use chunking above this */
 
 /* GS_OP_MEMSET request */
 PACKED_STRUCT_BEGIN typedef struct ATTR_PACKED {

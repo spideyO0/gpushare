@@ -18,10 +18,14 @@
 #include <cstdint>
 #include <mutex>
 #include <atomic>
+#include <condition_variable>
 #include <unordered_map>
 #include <vector>
 #include <string>
 #include <fstream>
+#include <memory>
+#include <future>
+#include <thread>
 
 /* Platform-specific networking */
 #ifdef _WIN32
@@ -301,11 +305,98 @@ static int g_verbose = 0;
 
 /* ── Connection state ────────────────────────────────────── */
 static sock_t       g_sock = SOCK_INVALID;
-static std::mutex   g_sock_mtx;
+static std::mutex   g_send_mtx;     /* Phase 4: protects send() calls only */
 static std::atomic<uint32_t> g_req_id{1};
 static std::string  g_server_host = "localhost";
 static int          g_server_port = GPUSHARE_DEFAULT_PORT;
 static cudaError_t  g_last_error  = cudaSuccess;
+
+/* Phase 2: Server capabilities (read from init response) */
+static uint32_t     g_server_caps = 0;
+
+/* Forward declarations (defined below, needed by recv thread) */
+static bool send_all(sock_t fd, const void *buf, size_t len);
+static bool recv_all(sock_t fd, void *buf, size_t len);
+
+/* Phase 4: Request pipelining — dedicated recv thread dispatches by req_id */
+struct PendingRequest {
+    std::promise<std::vector<uint8_t>> promise;
+    uint16_t resp_flags = 0;
+};
+
+static std::mutex   g_pending_mtx;
+static std::unordered_map<uint32_t, std::shared_ptr<PendingRequest>> g_pending;
+static std::thread  g_recv_thread;
+static std::atomic<bool> g_recv_running{false};
+
+static void recv_thread_func() {
+    /* Capture socket fd at thread start — g_sock is guaranteed to be valid
+     * because start_recv_thread is called after successful connect/init. */
+    sock_t sock = g_sock;
+    while (g_recv_running.load()) {
+        gs_header_t resp_hdr;
+        if (!recv_all(sock, &resp_hdr, sizeof(resp_hdr))) {
+            /* Connection lost — fulfill all pending with error */
+            std::lock_guard<std::mutex> lock(g_pending_mtx);
+            for (auto &kv : g_pending) {
+                std::vector<uint8_t> empty;
+                kv.second->resp_flags = GS_FLAG_ERROR;
+                try { kv.second->promise.set_value(std::move(empty)); } catch (...) {}
+            }
+            g_pending.clear();
+            break;
+        }
+        if (!gs_header_validate(&resp_hdr)) continue;
+
+        uint32_t pl = resp_hdr.length - GPUSHARE_HEADER_SIZE;
+        std::vector<uint8_t> payload(pl);
+        if (pl > 0 && !recv_all(sock, payload.data(), pl)) {
+            std::lock_guard<std::mutex> lock(g_pending_mtx);
+            for (auto &kv : g_pending) {
+                std::vector<uint8_t> empty;
+                kv.second->resp_flags = GS_FLAG_ERROR;
+                try { kv.second->promise.set_value(std::move(empty)); } catch (...) {}
+            }
+            g_pending.clear();
+            break;
+        }
+
+        uint32_t rid = resp_hdr.req_id;
+        std::shared_ptr<PendingRequest> req;
+        {
+            std::lock_guard<std::mutex> lock(g_pending_mtx);
+            auto it = g_pending.find(rid);
+            if (it != g_pending.end()) {
+                req = it->second;
+                g_pending.erase(it);
+            }
+        }
+        if (req) {
+            req->resp_flags = resp_hdr.flags;
+            try { req->promise.set_value(std::move(payload)); } catch (...) {}
+        }
+    }
+}
+
+static void start_recv_thread() {
+    bool expected = false;
+    if (!g_recv_running.compare_exchange_strong(expected, true)) return;
+    g_recv_thread = std::thread(recv_thread_func);
+}
+
+static void stop_recv_thread() {
+    if (!g_recv_running.load()) return;
+    g_recv_running = false;
+    /* Unblock recv_all by shutting down the read side */
+    if (g_sock != SOCK_INVALID) {
+#ifdef _WIN32
+        shutdown(g_sock, SD_RECEIVE);
+#else
+        shutdown(g_sock, SHUT_RD);
+#endif
+    }
+    if (g_recv_thread.joinable()) g_recv_thread.join();
+}
 
 /* ── Handle mapping ──────────────────────────────────────── */
 /*
@@ -473,7 +564,7 @@ static bool ensure_connected() {
     /* Keep-alive for connection health */
     setsockopt(g_sock, SOL_SOCKET, SO_KEEPALIVE, (const char*)&flag, sizeof(flag));
 
-    /* Send init */
+    /* Send init — done before recv thread starts, so we read directly here */
     gs_header_t hdr;
     gs_init_req_t req;
     gs_header_init(&hdr, GS_OP_INIT, g_req_id++, GPUSHARE_HEADER_SIZE + sizeof(req));
@@ -486,7 +577,7 @@ static bool ensure_connected() {
         return false;
     }
 
-    /* Read init response */
+    /* Read init response (before recv thread exists) */
     gs_header_t resp_hdr;
     if (!recv_all(g_sock, &resp_hdr, sizeof(resp_hdr))) {
         ERR("Failed to read init response");
@@ -495,51 +586,117 @@ static bool ensure_connected() {
         return false;
     }
 
-    gs_init_resp_t resp;
-    if (!recv_all(g_sock, &resp, sizeof(resp))) {
+    uint32_t resp_pl = resp_hdr.length - GPUSHARE_HEADER_SIZE;
+    /* Read full payload (may be 12 bytes for old server, 16 for new) */
+    std::vector<uint8_t> resp_buf(resp_pl);
+    if (resp_pl > 0 && !recv_all(g_sock, resp_buf.data(), resp_pl)) {
         ERR("Failed to read init payload");
         sock_close(g_sock);
         g_sock = SOCK_INVALID;
         return false;
     }
 
-    TRACE("Connected! Session %u, server version %u", resp.session_id, resp.version);
+    /* Parse init response — backward compatible with old servers */
+    gs_init_resp_t resp;
+    memset(&resp, 0, sizeof(resp));
+    memcpy(&resp, resp_buf.data(), std::min((size_t)resp_pl, sizeof(resp)));
+
+    g_server_caps = resp.capabilities;
+    TRACE("Connected! Session %u, server version %u, caps=0x%x",
+          resp.session_id, resp.version, g_server_caps);
+
+    /* Phase 4: Start dedicated recv thread for pipelined requests */
+    start_recv_thread();
+
     return true;
 }
+
+/* Phase 4: Pipelined RPC — multiple threads can have in-flight requests.
+ * g_send_mtx serializes sends; a dedicated recv thread dispatches responses
+ * to the correct caller via req_id -> promise lookup. */
 
 /* Send request and receive response. Returns payload (caller owns the data). */
 /* Non-static so generated_stubs.cpp can use them */
 bool rpc_call(uint16_t opcode, const void *req_payload, uint32_t req_len,
                      std::vector<uint8_t> &resp_payload, uint16_t *resp_flags = nullptr) {
-    std::lock_guard<std::mutex> lock(g_sock_mtx);
-    if (!ensure_connected()) return false;
-
-    uint32_t rid = g_req_id++;
-    gs_header_t hdr;
-    gs_header_init(&hdr, opcode, rid, GPUSHARE_HEADER_SIZE + req_len);
-
-    if (!send_all(g_sock, &hdr, sizeof(hdr))) goto fail;
-    if (req_len > 0 && !send_all(g_sock, req_payload, req_len)) goto fail;
-
-    /* Read response header */
+    /* Ensure connection (only one thread should do this) */
     {
-        gs_header_t resp_hdr;
-        if (!recv_all(g_sock, &resp_hdr, sizeof(resp_hdr))) goto fail;
-        if (!gs_header_validate(&resp_hdr)) goto fail;
+        std::lock_guard<std::mutex> lock(g_send_mtx);
+        if (!ensure_connected()) return false;
+    }
 
-        uint32_t pl = resp_hdr.length - GPUSHARE_HEADER_SIZE;
-        resp_payload.resize(pl);
-        if (pl > 0 && !recv_all(g_sock, resp_payload.data(), pl)) goto fail;
+    /* Create pending request with future */
+    auto pending = std::make_shared<PendingRequest>();
+    auto future = pending->promise.get_future();
+    uint32_t rid = g_req_id++;
 
-        if (resp_flags) *resp_flags = resp_hdr.flags;
+    {
+        std::lock_guard<std::mutex> lock(g_pending_mtx);
+        g_pending[rid] = pending;
+    }
+
+    /* Send under send mutex */
+    {
+        gs_header_t hdr;
+        gs_header_init(&hdr, opcode, rid, GPUSHARE_HEADER_SIZE + req_len);
+
+        std::lock_guard<std::mutex> lock(g_send_mtx);
+        if (!send_all(g_sock, &hdr, sizeof(hdr)) ||
+            (req_len > 0 && !send_all(g_sock, req_payload, req_len))) {
+            std::lock_guard<std::mutex> plock(g_pending_mtx);
+            g_pending.erase(rid);
+            ERR("RPC send failed (opcode=0x%04x)", opcode);
+            return false;
+        }
+    }
+
+    /* Wait for recv thread to deliver our response */
+    resp_payload = future.get();
+    if (resp_flags) *resp_flags = pending->resp_flags;
+
+    if (resp_payload.empty() && (pending->resp_flags & GS_FLAG_ERROR)) {
+        ERR("RPC call failed (opcode=0x%04x), connection lost", opcode);
+        return false;
     }
     return true;
+}
 
-fail:
-    ERR("RPC call failed (opcode=0x%04x), disconnecting", opcode);
-    sock_close(g_sock);
-    g_sock = SOCK_INVALID;
-    return false;
+/* Pipelined RPC with custom flags on the header (for chunked transfers) */
+static bool rpc_call_flags(uint16_t opcode, uint16_t flags, const void *req_payload, uint32_t req_len,
+                           std::vector<uint8_t> &resp_payload, uint16_t *resp_flags = nullptr) {
+    {
+        std::lock_guard<std::mutex> lock(g_send_mtx);
+        if (!ensure_connected()) return false;
+    }
+
+    auto pending = std::make_shared<PendingRequest>();
+    auto future = pending->promise.get_future();
+    uint32_t rid = g_req_id++;
+
+    {
+        std::lock_guard<std::mutex> lock(g_pending_mtx);
+        g_pending[rid] = pending;
+    }
+
+    {
+        gs_header_t hdr;
+        gs_header_init(&hdr, opcode, rid, GPUSHARE_HEADER_SIZE + req_len);
+        hdr.flags = flags;
+
+        std::lock_guard<std::mutex> lock(g_send_mtx);
+        if (!send_all(g_sock, &hdr, sizeof(hdr)) ||
+            (req_len > 0 && !send_all(g_sock, req_payload, req_len))) {
+            std::lock_guard<std::mutex> plock(g_pending_mtx);
+            g_pending.erase(rid);
+            ERR("RPC send failed (opcode=0x%04x, flags=0x%04x)", opcode, flags);
+            return false;
+        }
+    }
+
+    resp_payload = future.get();
+    if (resp_flags) *resp_flags = pending->resp_flags;
+    if (resp_payload.empty() && (pending->resp_flags & GS_FLAG_ERROR)) return false;
+    return true;
 }
 
 /* Convenience: RPC that returns just a cuda_error */
@@ -686,13 +843,82 @@ GPUSHARE_EXPORT cudaError_t cudaFree(void *devPtr) {
     return (cudaError_t)rpc_simple(GS_OP_FREE, &req, sizeof(req));
 }
 
+/* Phase 3: Chunked H2D transfer — sends 4MB chunks, each ACK'd by server */
+static cudaError_t cudaMemcpy_h2d_chunked(void *dst, const void *src, size_t count,
+                                           uint64_t stream_handle) {
+    const uint8_t *data = (const uint8_t*)src;
+    uint64_t dev_ptr = ptr_to_handle(dst);
+    uint64_t offset = 0;
+
+    while (offset < count) {
+        uint32_t chunk_size = (uint32_t)std::min((uint64_t)GS_CHUNK_SIZE, count - offset);
+
+        std::vector<uint8_t> payload(sizeof(gs_memcpy_h2d_chunk_t) + chunk_size);
+        auto *chunk = (gs_memcpy_h2d_chunk_t*)payload.data();
+        chunk->device_ptr = dev_ptr;
+        chunk->total_size = count;
+        chunk->chunk_offset = offset;
+        chunk->chunk_size = chunk_size;
+        chunk->stream_handle = stream_handle;
+        memcpy(payload.data() + sizeof(gs_memcpy_h2d_chunk_t), data + offset, chunk_size);
+
+        std::vector<uint8_t> resp;
+        if (!rpc_call_flags(GS_OP_MEMCPY_H2D, GS_FLAG_CHUNKED, payload.data(),
+                            (uint32_t)payload.size(), resp))
+            return cudaErrorUnknown;
+        if (resp.size() >= sizeof(gs_generic_resp_t)) {
+            int32_t err = ((const gs_generic_resp_t*)resp.data())->cuda_error;
+            if (err != 0) return (cudaError_t)err;
+        }
+        offset += chunk_size;
+    }
+    return cudaSuccess;
+}
+
+/* Phase 3: Chunked D2H transfer — requests chunks, receives them in order */
+static cudaError_t cudaMemcpy_d2h_chunked(void *dst, const void *src, size_t count,
+                                           uint64_t stream_handle) {
+    uint8_t *out = (uint8_t*)dst;
+    uint64_t dev_ptr = ptr_to_handle(src);
+    uint64_t offset = 0;
+
+    while (offset < count) {
+        uint32_t chunk_size = (uint32_t)std::min((uint64_t)GS_CHUNK_SIZE, count - offset);
+
+        gs_memcpy_d2h_chunk_t chunk;
+        chunk.device_ptr = dev_ptr;
+        chunk.total_size = count;
+        chunk.chunk_offset = offset;
+        chunk.chunk_size = chunk_size;
+        chunk.stream_handle = stream_handle;
+
+        std::vector<uint8_t> resp;
+        if (!rpc_call_flags(GS_OP_MEMCPY_D2H, GS_FLAG_CHUNKED, &chunk, sizeof(chunk), resp))
+            return cudaErrorUnknown;
+        if (resp.size() < sizeof(int32_t)) return cudaErrorUnknown;
+        int32_t err;
+        memcpy(&err, resp.data(), sizeof(err));
+        if (err != 0) return (cudaError_t)err;
+        if (resp.size() >= sizeof(int32_t) + chunk_size) {
+            memcpy(out + offset, resp.data() + sizeof(int32_t), chunk_size);
+        }
+        offset += chunk_size;
+    }
+    return cudaSuccess;
+}
+
 GPUSHARE_EXPORT cudaError_t cudaMemcpy(void *dst, const void *src, size_t count, cudaMemcpyKind kind) {
     TRACE("cudaMemcpy(%zu bytes, kind=%d)", count, kind);
     if (g_local.available && !is_remote_device(g_active_device) && g_local.Memcpy)
         return g_local.Memcpy(dst, src, count, kind);
 
     if (kind == cudaMemcpyHostToDevice) {
-        /* Send host data to server */
+        /* Phase 3: Use chunked transfer for large payloads */
+        if (count > GS_CHUNK_THRESHOLD && (g_server_caps & GS_CAP_CHUNKED)) {
+            g_last_error = cudaMemcpy_h2d_chunked(dst, src, count, 0);
+            return g_last_error;
+        }
+        /* Standard single-message path */
         std::vector<uint8_t> payload(sizeof(gs_memcpy_h2d_req_t) + count);
         auto *req = (gs_memcpy_h2d_req_t*)payload.data();
         req->device_ptr = ptr_to_handle(dst);
@@ -702,7 +928,12 @@ GPUSHARE_EXPORT cudaError_t cudaMemcpy(void *dst, const void *src, size_t count,
         return g_last_error;
 
     } else if (kind == cudaMemcpyDeviceToHost) {
-        /* Request data from server */
+        /* Phase 3: Use chunked transfer for large payloads */
+        if (count > GS_CHUNK_THRESHOLD && (g_server_caps & GS_CAP_CHUNKED)) {
+            g_last_error = cudaMemcpy_d2h_chunked(dst, src, count, 0);
+            return g_last_error;
+        }
+        /* Standard single-message path */
         gs_memcpy_d2h_req_t req;
         req.device_ptr = ptr_to_handle(src);
         req.size = count;
@@ -736,7 +967,50 @@ GPUSHARE_EXPORT cudaError_t cudaMemcpyAsync(void *dst, const void *src, size_t c
                                              cudaMemcpyKind kind, cudaStream_t stream) {
     if (g_local.available && !is_remote_device(g_active_device) && g_local.MemcpyAsync)
         return g_local.MemcpyAsync(dst, src, count, kind, stream);
-    (void)stream;
+
+    /* Phase 2: Use async opcodes when server supports them */
+    if (g_server_caps & GS_CAP_ASYNC) {
+        if (kind == cudaMemcpyHostToDevice) {
+            /* Phase 3: Chunked async H2D for large transfers */
+            if (count > GS_CHUNK_THRESHOLD && (g_server_caps & GS_CAP_CHUNKED)) {
+                return cudaMemcpy_h2d_chunked(dst, src, count, ptr_to_handle(stream));
+            }
+            std::vector<uint8_t> payload(sizeof(gs_memcpy_h2d_async_req_t) + count);
+            auto *req = (gs_memcpy_h2d_async_req_t*)payload.data();
+            req->device_ptr = ptr_to_handle(dst);
+            req->size = count;
+            req->stream_handle = ptr_to_handle(stream);
+            memcpy(payload.data() + sizeof(gs_memcpy_h2d_async_req_t), src, count);
+
+            std::vector<uint8_t> resp;
+            if (!rpc_call(GS_OP_MEMCPY_H2D_ASYNC, payload.data(), (uint32_t)payload.size(), resp))
+                return cudaErrorUnknown;
+            if (resp.size() >= sizeof(gs_generic_resp_t))
+                return (cudaError_t)((const gs_generic_resp_t*)resp.data())->cuda_error;
+            return cudaSuccess;
+        }
+        /* D2H async: use async opcode (still synchronous on server for now) */
+        if (kind == cudaMemcpyDeviceToHost) {
+            if (count > GS_CHUNK_THRESHOLD && (g_server_caps & GS_CAP_CHUNKED)) {
+                return cudaMemcpy_d2h_chunked(dst, src, count, ptr_to_handle(stream));
+            }
+            gs_memcpy_d2h_async_req_t req;
+            req.device_ptr = ptr_to_handle(src);
+            req.size = count;
+            req.stream_handle = ptr_to_handle(stream);
+            std::vector<uint8_t> resp;
+            if (!rpc_call(GS_OP_MEMCPY_D2H_ASYNC, &req, sizeof(req), resp)) return cudaErrorUnknown;
+            if (resp.size() < sizeof(int32_t)) return cudaErrorUnknown;
+            int32_t err;
+            memcpy(&err, resp.data(), sizeof(err));
+            if (err != 0) return (cudaError_t)err;
+            if (resp.size() >= sizeof(int32_t) + count)
+                memcpy(dst, resp.data() + sizeof(int32_t), count);
+            return cudaSuccess;
+        }
+    }
+
+    /* Fallback: synchronous memcpy */
     return cudaMemcpy(dst, src, count, kind);
 }
 
@@ -983,7 +1257,7 @@ static CUresult cache_device_props() {
 GPUSHARE_EXPORT CUresult cuInit(unsigned int flags) {
     TRACE("cuInit(%u)", flags);
     (void)flags;
-    std::lock_guard<std::mutex> lock(g_sock_mtx);
+    std::lock_guard<std::mutex> lock(g_send_mtx);
     if (!ensure_connected()) return CUDA_ERROR_NO_DEVICE;
     return CUDA_SUCCESS;
 }
@@ -1206,8 +1480,6 @@ GPUSHARE_EXPORT CUresult cuMemGetInfo(size_t *f, size_t *t) { return cuMemGetInf
 
 GPUSHARE_EXPORT CUresult cuModuleLoadData(CUmodule *module, const void *image) {
     TRACE("cuModuleLoadData");
-    std::lock_guard<std::mutex> lock(g_sock_mtx);
-    if (!ensure_connected()) return CUDA_ERROR_NOT_INITIALIZED;
 
     /* Determine data size (PTX is null-terminated) */
     const char *p = (const char*)image;
@@ -1221,29 +1493,15 @@ GPUSHARE_EXPORT CUresult cuModuleLoadData(CUmodule *module, const void *image) {
     memcpy(payload.data(), &req, sizeof(req));
     memcpy(payload.data() + sizeof(req), image, sz);
 
+    /* Use pipelined rpc_call instead of manual send/recv */
     std::vector<uint8_t> resp;
-    uint32_t rid = g_req_id++;
-    gs_header_t hdr;
-    gs_header_init(&hdr, GS_OP_MODULE_LOAD, rid, GPUSHARE_HEADER_SIZE + payload.size());
-    if (!send_all(g_sock, &hdr, sizeof(hdr))) return CUDA_ERROR_UNKNOWN;
-    if (!send_all(g_sock, payload.data(), payload.size())) return CUDA_ERROR_UNKNOWN;
-
-    gs_header_t resp_hdr;
-    if (!recv_all(g_sock, &resp_hdr, sizeof(resp_hdr))) return CUDA_ERROR_UNKNOWN;
-    gs_module_load_resp_t mresp;
-    uint32_t pl = resp_hdr.length - GPUSHARE_HEADER_SIZE;
-    if (pl >= sizeof(mresp)) {
-        if (!recv_all(g_sock, &mresp, sizeof(mresp))) return CUDA_ERROR_UNKNOWN;
-        if (pl > sizeof(mresp)) {
-            std::vector<uint8_t> drain(pl - sizeof(mresp));
-            recv_all(g_sock, drain.data(), drain.size());
-        }
-    } else {
+    if (!rpc_call(GS_OP_MODULE_LOAD, payload.data(), (uint32_t)payload.size(), resp))
         return CUDA_ERROR_UNKNOWN;
-    }
+    if (resp.size() < sizeof(gs_module_load_resp_t)) return CUDA_ERROR_UNKNOWN;
 
-    if (module) *module = (CUmodule)(uintptr_t)mresp.module_handle;
-    return (CUresult)mresp.cuda_error;
+    auto *mresp = (const gs_module_load_resp_t*)resp.data();
+    if (module) *module = (CUmodule)(uintptr_t)mresp->module_handle;
+    return (CUresult)mresp->cuda_error;
 }
 
 GPUSHARE_EXPORT CUresult cuModuleLoadDataEx(CUmodule *module, const void *image,
@@ -1429,7 +1687,7 @@ static nvmlDevice_t g_nvml_device = (nvmlDevice_t)&g_nvml_dev_sentinel;
 
 GPUSHARE_EXPORT nvmlReturn_t nvmlInit(void) {
     TRACE("nvmlInit");
-    std::lock_guard<std::mutex> lock(g_sock_mtx);
+    std::lock_guard<std::mutex> lock(g_send_mtx);
     if (!ensure_connected()) return NVML_ERROR_NOT_FOUND;
     g_nvml_initialized = true;
     return NVML_SUCCESS;
@@ -1706,15 +1964,26 @@ GPUSHARE_EXPORT const char* nvmlErrorString(nvmlReturn_t result) {
 /* ── Cleanup ─────────────────────────────────────────────── */
 
 static void GPUSHARE_DESTRUCTOR gpushare_cleanup(void) {
-    std::lock_guard<std::mutex> lock(g_sock_mtx);
     if (g_sock != SOCK_INVALID) {
-        gs_header_t hdr;
-        gs_header_init(&hdr, GS_OP_CLOSE, 0, GPUSHARE_HEADER_SIZE);
-        send_all(g_sock, &hdr, sizeof(hdr));
+        /* Send close message before tearing down */
+        {
+            std::lock_guard<std::mutex> lock(g_send_mtx);
+            gs_header_t hdr;
+            gs_header_init(&hdr, GS_OP_CLOSE, 0, GPUSHARE_HEADER_SIZE);
+            send_all(g_sock, &hdr, sizeof(hdr));
+        }
+        /* Stop recv thread (will unblock via shutdown) */
+        stop_recv_thread();
         sock_close(g_sock);
         g_sock = SOCK_INVALID;
         TRACE("Disconnected from server");
     }
+    /* Clear any remaining pending requests */
+    {
+        std::lock_guard<std::mutex> lock(g_pending_mtx);
+        g_pending.clear();
+    }
+    g_server_caps = 0;
 #ifndef _WIN32
     /* Clean up local GPU library handles */
     if (g_local.NvmlShutdown) g_local.NvmlShutdown();
@@ -1726,11 +1995,41 @@ static void GPUSHARE_DESTRUCTOR gpushare_cleanup(void) {
 }
 
 #ifdef _WIN32
-/* On Windows, use DllMain for cleanup instead of __attribute__((destructor)) */
+/* On Windows, use DllMain for cleanup instead of __attribute__((destructor)).
+ * CRITICAL: DllMain(DLL_PROCESS_DETACH) holds the loader lock. Calling
+ * std::thread::join() here deadlocks because the recv thread may need the
+ * loader lock to terminate its CRT state. Instead, detach the thread and
+ * just close the socket — the OS will clean up the thread on process exit. */
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
-    (void)hinstDLL; (void)lpvReserved;
+    (void)hinstDLL;
     if (fdwReason == DLL_PROCESS_DETACH) {
-        gpushare_cleanup();
+        /* Signal recv thread to stop */
+        g_recv_running = false;
+        if (g_sock != SOCK_INVALID) {
+            /* Send close message best-effort */
+            gs_header_t hdr;
+            gs_header_init(&hdr, GS_OP_CLOSE, 0, GPUSHARE_HEADER_SIZE);
+            send_all(g_sock, &hdr, sizeof(hdr));
+            /* Unblock recv thread */
+            shutdown(g_sock, SD_RECEIVE);
+        }
+        if (lpvReserved == NULL) {
+            /* Dynamic unload (FreeLibrary) — safe to join */
+            if (g_recv_thread.joinable()) g_recv_thread.join();
+        } else {
+            /* Process exit — NOT safe to join (loader lock held).
+             * Detach and let the OS tear down the thread. */
+            if (g_recv_thread.joinable()) g_recv_thread.detach();
+        }
+        if (g_sock != SOCK_INVALID) {
+            closesocket(g_sock);
+            g_sock = SOCK_INVALID;
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_pending_mtx);
+            g_pending.clear();
+        }
+        g_server_caps = 0;
     }
     return TRUE;
 }

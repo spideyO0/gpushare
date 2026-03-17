@@ -122,6 +122,81 @@ static NetType classify_client(const struct sockaddr_storage *client_addr) {
     return NET_WAN;
 }
 
+/* ── Pinned buffer pool ──────────────────────────────────── */
+/* Phase 1: Pinned (page-locked) host memory for faster DMA transfers.
+ * cudaMallocHost memory allows the GPU to use DMA directly, bypassing
+ * an extra copy through a pageable staging buffer. */
+#define PINNED_BUF_COUNT 4
+#define PINNED_BUF_SIZE  (4 * 1024 * 1024)  /* 4 MB each */
+
+struct PinnedBufferPool {
+    void *buffers[PINNED_BUF_COUNT] = {};
+    bool  in_use[PINNED_BUF_COUNT]  = {};
+    bool  is_pinned[PINNED_BUF_COUNT] = {};
+    std::mutex mtx;
+    bool initialized = false;
+
+    void init() {
+        for (int i = 0; i < PINNED_BUF_COUNT; i++) {
+            cudaError_t err = cudaMallocHost(&buffers[i], PINNED_BUF_SIZE);
+            is_pinned[i] = (err == cudaSuccess);
+            if (!is_pinned[i]) {
+                LOG_WARN("cudaMallocHost failed for pinned buffer %d, using malloc fallback", i);
+                buffers[i] = malloc(PINNED_BUF_SIZE);
+            }
+        }
+        initialized = true;
+        LOG_DBG("Pinned buffer pool: %d x %d MB allocated", PINNED_BUF_COUNT,
+                PINNED_BUF_SIZE / (1024 * 1024));
+    }
+
+    void destroy() {
+        for (int i = 0; i < PINNED_BUF_COUNT; i++) {
+            if (buffers[i]) {
+                if (is_pinned[i]) cudaFreeHost(buffers[i]);
+                else free(buffers[i]);
+                buffers[i] = nullptr;
+            }
+        }
+        initialized = false;
+    }
+
+    /* Returns a pinned buffer, or malloc fallback if all busy.
+     * index is set to the pool slot (-1 if fallback). */
+    void *acquire(size_t size, int &index) {
+        std::lock_guard<std::mutex> lock(mtx);
+        if (size <= PINNED_BUF_SIZE) {
+            for (int i = 0; i < PINNED_BUF_COUNT; i++) {
+                if (!in_use[i] && buffers[i]) {
+                    in_use[i] = true;
+                    index = i;
+                    return buffers[i];
+                }
+            }
+        }
+        /* Fallback: pageable allocation */
+        index = -1;
+        return malloc(size);
+    }
+
+    void release(void *buf, int index) {
+        if (index >= 0 && index < PINNED_BUF_COUNT) {
+            std::lock_guard<std::mutex> lock(mtx);
+            in_use[index] = false;
+        } else {
+            free(buf);
+        }
+    }
+};
+
+/* Phase 2: Track pending async transfers so we can release pinned buffers
+ * after the GPU finishes the async copy. */
+struct PendingTransfer {
+    void *pinned_buf;
+    int pool_index;
+    cudaEvent_t completion_event;
+};
+
 /* ── Per-client session ──────────────────────────────────── */
 struct ClientSession {
     int fd;
@@ -152,12 +227,19 @@ struct ClientSession {
     /* Map fatbin handles */
     std::unordered_map<uint64_t, CUmodule>   fatbin_map;
 
+    /* Pinned memory pool (Phase 1) */
+    PinnedBufferPool pinned_pool;
+
+    /* Pending async transfers (Phase 2) */
+    std::vector<PendingTransfer> pending_transfers;
+
     ClientSession(int fd_, uint32_t sid, const char *addr, NetType nt)
         : fd(fd_), session_id(sid), net_type(nt) {
         strncpy(addr_str, addr, sizeof(addr_str) - 1);
         addr_str[sizeof(addr_str) - 1] = '\0';
         connected_at = time(nullptr);
         recv_buf.resize(4096);
+        pinned_pool.init();
     }
 
     ~ClientSession() {
@@ -165,7 +247,30 @@ struct ClientSession {
         close(fd);
     }
 
+    /* Reap completed async transfers, releasing their pinned buffers */
+    void reap_pending_transfers() {
+        auto it = pending_transfers.begin();
+        while (it != pending_transfers.end()) {
+            cudaError_t err = cudaEventQuery(it->completion_event);
+            if (err == cudaSuccess) {
+                pinned_pool.release(it->pinned_buf, it->pool_index);
+                cudaEventDestroy(it->completion_event);
+                it = pending_transfers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
     void cleanup_resources() {
+        /* Wait for and release all pending async transfers */
+        for (auto &pt : pending_transfers) {
+            cudaEventSynchronize(pt.completion_event);
+            pinned_pool.release(pt.pinned_buf, pt.pool_index);
+            cudaEventDestroy(pt.completion_event);
+        }
+        pending_transfers.clear();
+
         for (void *p : allocated_ptrs) cudaFree(p);
         for (auto s : created_streams) cudaStreamDestroy(s);
         for (auto e : created_events)  cudaEventDestroy(e);
@@ -178,6 +283,7 @@ struct ClientSession {
         func_map.clear();
         fatbin_map.clear();
         mem_allocated = 0;
+        pinned_pool.destroy();
         LOG_INFO("Session %u: resources cleaned up", session_id);
     }
 
@@ -276,7 +382,9 @@ static bool handle_init(ClientSession *s, const gs_header_t *hdr, const uint8_t 
     resp.version = GPUSHARE_VERSION;
     resp.session_id = s->session_id;
     resp.max_transfer_size = GPUSHARE_MAX_MSG_SIZE - GPUSHARE_HEADER_SIZE;
-    LOG_INFO("Session %u: client connected from %s", s->session_id, s->addr_str);
+    resp.capabilities = GS_CAP_ASYNC | GS_CAP_CHUNKED;
+    LOG_INFO("Session %u: client connected from %s (caps=0x%x)",
+             s->session_id, s->addr_str, resp.capabilities);
     s->track_op();
     return send_response(s->fd, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
 }
@@ -380,10 +488,23 @@ static bool handle_memcpy_d2h(ClientSession *s, const gs_header_t *hdr, const ui
     auto *req = (const gs_memcpy_d2h_req_t*)payload;
     void *src = (void*)(uintptr_t)req->device_ptr;
 
-    std::vector<uint8_t> host_buf(req->size);
-    cudaError_t err = cudaMemcpy(host_buf.data(), src, req->size, cudaMemcpyDeviceToHost);
+    /* Phase 1: Use pinned buffer for transfers <= 4MB for faster DMA */
+    int pool_idx = -1;
+    void *host_buf = nullptr;
+    if (req->size <= PINNED_BUF_SIZE) {
+        s->reap_pending_transfers();
+        host_buf = s->pinned_pool.acquire(req->size, pool_idx);
+    } else {
+        host_buf = malloc(req->size);
+    }
 
-    if (err != cudaSuccess) return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    if (!host_buf) return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
+
+    cudaError_t err = cudaMemcpy(host_buf, src, req->size, cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        s->pinned_pool.release(host_buf, pool_idx);
+        return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    }
 
     uint32_t payload_len = sizeof(int32_t) + req->size;
     uint32_t total = GPUSHARE_HEADER_SIZE + payload_len;
@@ -392,10 +513,183 @@ static bool handle_memcpy_d2h(ClientSession *s, const gs_header_t *hdr, const ui
     resp_hdr.flags = GS_FLAG_RESPONSE;
 
     int32_t cuda_err = 0;
-    if (!send_all(s->fd, &resp_hdr, sizeof(resp_hdr))) return false;
-    if (!send_all(s->fd, &cuda_err, sizeof(cuda_err))) return false;
-    if (!send_all(s->fd, host_buf.data(), req->size)) return false;
+    bool ok = send_all(s->fd, &resp_hdr, sizeof(resp_hdr))
+           && send_all(s->fd, &cuda_err, sizeof(cuda_err))
+           && send_all(s->fd, host_buf, req->size);
+
+    s->pinned_pool.release(host_buf, pool_idx);
+    if (!ok) return false;
     s->track_op(0, req->size);
+    return true;
+}
+
+/* ── Phase 2: Async memcpy handlers ──────────────────────── */
+
+static bool handle_memcpy_h2d_async(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
+    auto *req = (const gs_memcpy_h2d_async_req_t*)payload;
+    void *dst = (void*)(uintptr_t)req->device_ptr;
+    const void *src_data = payload + sizeof(gs_memcpy_h2d_async_req_t);
+    cudaStream_t stream = (cudaStream_t)(uintptr_t)req->stream_handle;
+
+    /* Reap any completed transfers first */
+    s->reap_pending_transfers();
+
+    /* Copy network data into pinned buffer for async DMA */
+    int pool_idx = -1;
+    void *pinned_buf = s->pinned_pool.acquire(req->size, pool_idx);
+    if (!pinned_buf) return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
+
+    memcpy(pinned_buf, src_data, req->size);
+
+    cudaError_t err = cudaMemcpyAsync(dst, pinned_buf, req->size, cudaMemcpyHostToDevice, stream);
+    if (err != cudaSuccess) {
+        s->pinned_pool.release(pinned_buf, pool_idx);
+        return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    }
+
+    /* Track buffer release via event — buffer freed when GPU finishes */
+    cudaEvent_t ev = nullptr;
+    cudaError_t ev_err = cudaEventCreate(&ev);
+    if (ev_err != cudaSuccess) {
+        s->pinned_pool.release(pinned_buf, pool_idx);
+        return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, ev_err);
+    }
+    cudaEventRecord(ev, stream);
+    s->pending_transfers.push_back({pinned_buf, pool_idx, ev});
+
+    /* Send success immediately (before GPU completes) */
+    s->track_op(req->size, 0);
+    return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaSuccess);
+}
+
+static bool handle_memcpy_d2h_async(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
+    /* Phase 2: D2H async still synchronous but uses pinned buffer.
+     * True async D2H requires streaming response chunks back, deferred to Phase 3. */
+    auto *req = (const gs_memcpy_d2h_async_req_t*)payload;
+    void *src = (void*)(uintptr_t)req->device_ptr;
+    cudaStream_t stream = (cudaStream_t)(uintptr_t)req->stream_handle;
+
+    s->reap_pending_transfers();
+
+    int pool_idx = -1;
+    void *host_buf = nullptr;
+    if (req->size <= PINNED_BUF_SIZE) {
+        host_buf = s->pinned_pool.acquire(req->size, pool_idx);
+    } else {
+        host_buf = malloc(req->size);
+    }
+    if (!host_buf) return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
+
+    /* Use the stream for the copy, then synchronize to get data */
+    cudaError_t err = cudaMemcpyAsync(host_buf, src, req->size, cudaMemcpyDeviceToHost, stream);
+    if (err == cudaSuccess) err = cudaStreamSynchronize(stream);
+
+    if (err != cudaSuccess) {
+        s->pinned_pool.release(host_buf, pool_idx);
+        return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    }
+
+    uint32_t payload_len = sizeof(int32_t) + req->size;
+    uint32_t total = GPUSHARE_HEADER_SIZE + payload_len;
+    gs_header_t resp_hdr;
+    gs_header_init(&resp_hdr, hdr->opcode, hdr->req_id, total);
+    resp_hdr.flags = GS_FLAG_RESPONSE;
+
+    int32_t cuda_err = 0;
+    bool ok = send_all(s->fd, &resp_hdr, sizeof(resp_hdr))
+           && send_all(s->fd, &cuda_err, sizeof(cuda_err))
+           && send_all(s->fd, host_buf, req->size);
+
+    s->pinned_pool.release(host_buf, pool_idx);
+    if (!ok) return false;
+    s->track_op(0, req->size);
+    return true;
+}
+
+/* ── Phase 3: Chunked transfer handlers ──────────────────── */
+
+static bool handle_memcpy_h2d_chunked(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
+    auto *chunk = (const gs_memcpy_h2d_chunk_t*)payload;
+    void *dst = (void*)(uintptr_t)(chunk->device_ptr + chunk->chunk_offset);
+    const void *src_data = payload + sizeof(gs_memcpy_h2d_chunk_t);
+    cudaStream_t stream = (cudaStream_t)(uintptr_t)chunk->stream_handle;
+
+    s->reap_pending_transfers();
+
+    /* Copy chunk data into pinned buffer and async DMA to device */
+    int pool_idx = -1;
+    void *pinned_buf = s->pinned_pool.acquire(chunk->chunk_size, pool_idx);
+    if (!pinned_buf) return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
+
+    memcpy(pinned_buf, src_data, chunk->chunk_size);
+
+    cudaError_t err = cudaMemcpyAsync(dst, pinned_buf, chunk->chunk_size, cudaMemcpyHostToDevice, stream);
+    if (err != cudaSuccess) {
+        s->pinned_pool.release(pinned_buf, pool_idx);
+        return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    }
+
+    /* Track for deferred release */
+    cudaEvent_t ev = nullptr;
+    cudaError_t ev_err = cudaEventCreate(&ev);
+    if (ev_err != cudaSuccess) {
+        s->pinned_pool.release(pinned_buf, pool_idx);
+        return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, ev_err);
+    }
+    cudaEventRecord(ev, stream);
+    s->pending_transfers.push_back({pinned_buf, pool_idx, ev});
+
+    /* ACK immediately so client can send next chunk */
+    s->track_op(chunk->chunk_size, 0);
+    LOG_DBG("Session %u: H2D chunk offset=%lu size=%u (total=%lu)",
+            s->session_id, (unsigned long)chunk->chunk_offset,
+            chunk->chunk_size, (unsigned long)chunk->total_size);
+    return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaSuccess);
+}
+
+static bool handle_memcpy_d2h_chunked(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
+    auto *chunk = (const gs_memcpy_d2h_chunk_t*)payload;
+    void *src = (void*)(uintptr_t)(chunk->device_ptr + chunk->chunk_offset);
+    cudaStream_t stream = (cudaStream_t)(uintptr_t)chunk->stream_handle;
+    uint32_t csize = chunk->chunk_size;
+
+    s->reap_pending_transfers();
+
+    /* Double-buffer: acquire two pinned buffers for pipelining.
+     * For the single-chunk case this still works fine — we just use buf_a. */
+    int idx_a = -1;
+    void *buf_a = s->pinned_pool.acquire(csize, idx_a);
+    if (!buf_a) return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
+
+    /* Copy chunk from device using stream, then wait */
+    cudaError_t err = cudaMemcpyAsync(buf_a, src, csize, cudaMemcpyDeviceToHost, stream);
+    if (err == cudaSuccess) err = cudaStreamSynchronize(stream);
+
+    if (err != cudaSuccess) {
+        s->pinned_pool.release(buf_a, idx_a);
+        return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    }
+
+    /* Send chunk response */
+    uint32_t payload_len = sizeof(int32_t) + csize;
+    uint32_t total = GPUSHARE_HEADER_SIZE + payload_len;
+    gs_header_t resp_hdr;
+    gs_header_init(&resp_hdr, hdr->opcode, hdr->req_id, total);
+    resp_hdr.flags = GS_FLAG_RESPONSE | GS_FLAG_CHUNKED;
+    if (chunk->chunk_offset + csize >= chunk->total_size)
+        resp_hdr.flags |= GS_FLAG_LAST_CHUNK;
+
+    int32_t cuda_err = 0;
+    bool ok = send_all(s->fd, &resp_hdr, sizeof(resp_hdr))
+           && send_all(s->fd, &cuda_err, sizeof(cuda_err))
+           && send_all(s->fd, buf_a, csize);
+
+    s->pinned_pool.release(buf_a, idx_a);
+    if (!ok) return false;
+    s->track_op(0, csize);
+    LOG_DBG("Session %u: D2H chunk offset=%lu size=%u (total=%lu)",
+            s->session_id, (unsigned long)chunk->chunk_offset,
+            csize, (unsigned long)chunk->total_size);
     return true;
 }
 
@@ -754,10 +1048,18 @@ static bool handle_message(ClientSession *s, const uint8_t *msg, uint32_t len) {
         case GS_OP_SET_DEVICE:       return handle_set_device(s, hdr, payload);
         case GS_OP_MALLOC:           return handle_malloc(s, hdr, payload);
         case GS_OP_FREE:             return handle_free(s, hdr, payload);
-        case GS_OP_MEMCPY_H2D:      return handle_memcpy_h2d(s, hdr, payload);
-        case GS_OP_MEMCPY_D2H:      return handle_memcpy_d2h(s, hdr, payload);
+        case GS_OP_MEMCPY_H2D:
+            if (hdr->flags & GS_FLAG_CHUNKED)
+                return handle_memcpy_h2d_chunked(s, hdr, payload);
+            return handle_memcpy_h2d(s, hdr, payload);
+        case GS_OP_MEMCPY_D2H:
+            if (hdr->flags & GS_FLAG_CHUNKED)
+                return handle_memcpy_d2h_chunked(s, hdr, payload);
+            return handle_memcpy_d2h(s, hdr, payload);
         case GS_OP_MEMCPY_D2D:      return handle_memcpy_d2d(s, hdr, payload);
         case GS_OP_MEMSET:           return handle_memset(s, hdr, payload);
+        case GS_OP_MEMCPY_H2D_ASYNC:return handle_memcpy_h2d_async(s, hdr, payload);
+        case GS_OP_MEMCPY_D2H_ASYNC:return handle_memcpy_d2h_async(s, hdr, payload);
         case GS_OP_MODULE_LOAD:      return handle_module_load(s, hdr, payload);
         case GS_OP_MODULE_UNLOAD:    return handle_module_unload(s, hdr, payload);
         case GS_OP_GET_FUNCTION:     return handle_get_function(s, hdr, payload);

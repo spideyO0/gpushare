@@ -128,7 +128,7 @@ gpushare-server: CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o
 gpushare-server: CMakeFiles/gpushare-server.dir/server/generated_all_dispatch.cpp.o
 gpushare-server: CMakeFiles/gpushare-server.dir/build.make
 gpushare-server: CMakeFiles/gpushare-server.dir/compiler_depend.ts
-gpushare-server: /opt/cuda/targets/x86_64-linux/lib/libcudart.so
+gpushare-server: /opt/cuda/lib/libcudart.so
 gpushare-server: /opt/cuda/targets/x86_64-linux/lib/stubs/libcuda.so
 gpushare-server: /usr/lib/librt.a
 gpushare-server: CMakeFiles/gpushare-server.dir/link.txt

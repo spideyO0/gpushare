@@ -294,7 +294,7 @@ STUB_EXPORT int WEAK_SYM cudaUserObjectCreate() { return 0; }
 STUB_EXPORT int WEAK_SYM cudaUserObjectRelease() { return 0; }
 STUB_EXPORT int WEAK_SYM cudaUserObjectRetain() { return 0; }
 STUB_EXPORT int WEAK_SYM cudaWaitExternalSemaphoresAsync() { return 0; }
-/* (27 functions skipped - have full RPC in gpushare_client.cpp) */
+/* (60 functions skipped - have full RPC in gpushare_client.cpp) */
 
 /* -- cuda_driver: 512 functions -- */
 STUB_EXPORT int WEAK_SYM cuArray3DCreate() { return 0; }
@@ -1272,6 +1272,7 @@ STUB_EXPORT int WEAK_SYM cublasZtrsm_v2_64() { return 0; }
 STUB_EXPORT int WEAK_SYM cublasZtrsv_v2() { return 0; }
 STUB_EXPORT int WEAK_SYM cublasZtrsv_v2_64() { return 0; }
 STUB_EXPORT int WEAK_SYM cublasZtrttp() { return 0; }
+/* (33 functions skipped - have full RPC in gpushare_client.cpp) */
 
 /* -- cublasLt: 58 functions -- */
 STUB_EXPORT int WEAK_SYM cublasLtCreate() { return 0; }

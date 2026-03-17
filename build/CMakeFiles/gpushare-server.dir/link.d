@@ -5,7 +5,7 @@ gpushare-server: \
   CMakeFiles/gpushare-server.dir/server/server.cpp.o \
   CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o \
   CMakeFiles/gpushare-server.dir/server/generated_all_dispatch.cpp.o \
-  /opt/cuda/targets/x86_64-linux/lib/libcudart.so \
+  /opt/cuda/lib/libcudart.so \
   /opt/cuda/targets/x86_64-linux/lib/stubs/libcuda.so \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libpthread.a \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libdl.a \
@@ -57,7 +57,7 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 
 CMakeFiles/gpushare-server.dir/server/generated_all_dispatch.cpp.o:
 
-/opt/cuda/targets/x86_64-linux/lib/libcudart.so:
+/opt/cuda/lib/libcudart.so:
 
 /opt/cuda/targets/x86_64-linux/lib/stubs/libcuda.so:
 

@@ -57,7 +57,8 @@ if(BUILD_CLIENT)
         endif()
     else()
         # dl is needed for dlopen/dlsym (local GPU passthrough)
-        target_link_libraries(gpushare_client PRIVATE dl)
+        # pthread is needed for the recv thread (Phase 4 pipelining)
+        target_link_libraries(gpushare_client PRIVATE dl pthread)
     endif()
 
     # Export CUDA symbols so LD_PRELOAD / DYLD_INSERT_LIBRARIES works
