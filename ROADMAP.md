@@ -235,7 +235,7 @@ public:
 
 ---
 
-## Phase 11: Multi-Server GPU Pooling (planned)
+## Phase 11: Multi-Server GPU Pooling (done)
 
 **Gap:** rCUDA supports multiple clients sharing multiple GPUs across multiple servers. gpushare is single-server, single-GPU.
 
@@ -315,7 +315,7 @@ done     Phase 7: Adaptive Buffer Sizing ──────────── rC
 done     Phase 8: Network Transport Abstraction ───── prerequisite for RDMA
 done     Phase 9: InfiniBand / RDMA Transport ─────── rCUDA's key advantage (97.7% wire speed)
 done     Phase 10: Transfer Compression ────────────── LZ4/zstd auto-detected, ratio threshold
-planned  Phase 11: Multi-Server GPU Pooling ────────── rCUDA's multi-node GPU sharing
+done     Phase 11: Multi-Server GPU Pooling ────────── rCUDA's multi-node GPU sharing
            │
 research Phase 12: GPU Context Scheduling ──────────── multi-tenant fairness
 research Phase 13: GPUDirect RDMA ──────────────────── zero-copy NIC-to-GPU transfers
@@ -338,7 +338,7 @@ research Phase 13: GPUDirect RDMA ───────────────�
 | InfiniBand Verbs | Yes (97.7% wire) | Yes (Phase 9, optional) | Yes |
 | GPUDirect RDMA | Yes | No | Phase 13 |
 | Transfer compression | Yes (2022) | Yes (Phase 10, LZ4/zstd) | Yes |
-| Multi-server pooling | Yes | No | Phase 11 |
+| Multi-server pooling | Yes | Yes (Phase 11) | Yes |
 | GPU scheduling | Yes | No | Phase 12 |
 | Cross-platform client | No (Linux only) | Yes (Linux/macOS/Win) | Yes |
 | Driver API + NVML | No | Yes | Yes |

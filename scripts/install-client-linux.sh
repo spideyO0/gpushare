@@ -778,8 +778,8 @@ echo -e "  Library:         $LIB_DIR/libgpushare_client.so"
 echo -e "  Config:          $CONF_DIR/client.conf"
 if [[ "$NO_SYMLINKS" == false ]]; then
 echo -e "  CUDA override:   ${GREEN}ACTIVE${NC} (libcudart.so -> gpushare)"
-echo -e "  API coverage:    2600+ functions (cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSOLVER, cuRAND, NVRTC, nvJPEG)"
-echo -e "  Transfer opts:   ${GREEN}ACTIVE${NC} (tiered pinned pools, async memcpy, chunked pipelining, D2H prefetch, RDMA, LZ4/zstd)"
+echo -e "  API coverage:    2620+ functions (cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSOLVER, cuRAND, NVRTC, nvJPEG)"
+echo -e "  Transfer opts:   ${GREEN}ACTIVE${NC} (tiered pinned pools, async memcpy, chunked pipelining, D2H prefetch, RDMA, LZ4/zstd, multi-server GPU pooling)"
 if grep -q "^IBVERBS_LIB:FILEPATH=.*libibverbs" "$BUILD_DIR/CMakeCache.txt" 2>/dev/null; then
 echo -e "  RDMA transport:  ${GREEN}BUILT IN${NC} (rdma-core auto-detected)"
 elif [[ -f /usr/lib/libibverbs.so ]] || [[ -f /usr/lib64/libibverbs.so ]] || ldconfig -p 2>/dev/null | grep -q libibverbs; then

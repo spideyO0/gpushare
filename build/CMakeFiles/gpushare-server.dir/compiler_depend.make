@@ -266,6 +266,7 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o: /home/spideyo0/g
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/include/stdint.h
 
 CMakeFiles/gpushare-server.dir/server/server.cpp.o: /home/spideyo0/gpushare/server/server.cpp \
+  /home/spideyo0/gpushare/include/gpushare/compression.h \
   /home/spideyo0/gpushare/include/gpushare/protocol.h \
   /home/spideyo0/gpushare/include/gpushare/rdma_transport.h \
   /home/spideyo0/gpushare/include/gpushare/transport.h \
@@ -594,6 +595,7 @@ CMakeFiles/gpushare-server.dir/server/server.cpp.o: /home/spideyo0/gpushare/serv
   /usr/include/linux/stddef.h \
   /usr/include/linux/types.h \
   /usr/include/locale.h \
+  /usr/include/lz4.h \
   /usr/include/net/if.h \
   /usr/include/netdb.h \
   /usr/include/netinet/in.h \
@@ -623,6 +625,8 @@ CMakeFiles/gpushare-server.dir/server/server.cpp.o: /home/spideyo0/gpushare/serv
   /usr/include/unistd.h \
   /usr/include/wchar.h \
   /usr/include/wctype.h \
+  /usr/include/zstd.h \
+  /usr/include/zstd_errors.h \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/include/limits.h \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/include/stdarg.h \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/include/stddef.h \
@@ -649,6 +653,7 @@ gpushare-server: /opt/cuda/lib/libcudart.so \
   /usr/lib/libc_nonshared.a \
   /usr/lib/libdl.so.2 \
   /usr/lib/libibverbs.so \
+  /usr/lib/liblz4.so \
   /usr/lib/libm.so.6 \
   /usr/lib/libmvec.so.1 \
   /usr/lib/libnl-3.so.200 \
@@ -657,6 +662,7 @@ gpushare-server: /opt/cuda/lib/libcudart.so \
   /usr/lib/librdmacm.so \
   /usr/lib/librt.a \
   /usr/lib/librt.so.1 \
+  /usr/lib/libzstd.so \
   /usr/lib32/libdl.so.2 \
   /usr/lib32/libpthread.so.0 \
   /usr/lib32/librt.so.1 \
@@ -670,6 +676,8 @@ CMakeFiles/gpushare-server.dir/server/server.cpp.o:
 CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 
 /usr/lib32/libdl.so.2:
+
+/usr/lib/libzstd.so:
 
 /usr/lib/libnl-route-3.so.200:
 
@@ -706,6 +714,10 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 /usr/lib/Scrt1.o:
 
 /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/include/syslimits.h:
+
+/usr/include/zstd_errors.h:
+
+/usr/include/zstd.h:
 
 /usr/include/unistd.h:
 
@@ -854,6 +866,8 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 /usr/include/c++/15.2.1/algorithm:
 
 /usr/include/bits/xopen_lim.h:
+
+/usr/include/bits/wctype-wchar.h:
 
 /usr/include/c++/15.2.1/string:
 
@@ -1159,9 +1173,13 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 
 /usr/include/bits/uintn-identity.h:
 
+/usr/lib/liblz4.so:
+
 /usr/include/c++/15.2.1/bits/string_view.tcc:
 
 /usr/include/bits/typesizes.h:
+
+/usr/include/lz4.h:
 
 /usr/include/bits/types/__fpos_t.h:
 
@@ -1253,10 +1271,6 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 
 /usr/include/bits/netdb.h:
 
-/usr/include/asm-generic/errno.h:
-
-/usr/include/c++/15.2.1/bits/stl_vector.h:
-
 /usr/include/features-time64.h:
 
 /usr/include/linux/errno.h:
@@ -1280,8 +1294,6 @@ CMakeFiles/gpushare-server.dir/server/generated_dispatch.cpp.o:
 /usr/include/strings.h:
 
 /usr/include/sys/select.h:
-
-/usr/include/bits/wctype-wchar.h:
 
 /usr/include/c++/15.2.1/bits/ostream.tcc:
 
@@ -1340,6 +1352,12 @@ CMakeFiles/gpushare-server.dir/server/generated_all_dispatch.cpp.o:
 /usr/include/c++/15.2.1/bits/unordered_set.h:
 
 /usr/include/bits/sigstack.h:
+
+/usr/include/asm-generic/errno.h:
+
+/usr/include/c++/15.2.1/bits/stl_vector.h:
+
+/home/spideyo0/gpushare/include/gpushare/compression.h:
 
 /usr/include/bits/types/struct_sched_param.h:
 

@@ -427,93 +427,208 @@ static int g_verbose = 0;
 #define TRACE(fmt, ...) do { if (g_verbose) fprintf(stderr, "[gpushare] " fmt "\n", ##__VA_ARGS__); } while(0)
 #define ERR(fmt, ...)   fprintf(stderr, "[gpushare] ERROR: " fmt "\n", ##__VA_ARGS__)
 
-/* ── Connection state ────────────────────────────────────── */
-static sock_t       g_sock = SOCK_INVALID;
-static std::unique_ptr<Transport> g_transport;  /* Phase 8+9: transport abstraction */
-static std::mutex   g_send_mtx;     /* Phase 4: protects send() calls only */
-static std::atomic<uint32_t> g_req_id{1};
-static std::string  g_server_host = "localhost";
-static int          g_server_port = GPUSHARE_DEFAULT_PORT;
-static cudaError_t  g_last_error  = cudaSuccess;
+/* ── Phase 11: ServerConnection — per-server connection state ── */
+/* Each server gets its own transport, send mutex, recv thread, pending map,
+ * and capability flags. Multi-server pooling routes by device index. */
 
-/* Phase 2: Server capabilities (read from init response) */
-static uint32_t     g_server_caps = 0;
-
-/* Forward declarations (defined below, needed by recv thread) */
-static bool send_all(sock_t fd, const void *buf, size_t len);
-static bool recv_all(sock_t fd, void *buf, size_t len);
-
-/* Phase 4: Request pipelining — dedicated recv thread dispatches by req_id */
 struct PendingRequest {
     std::promise<std::vector<uint8_t>> promise;
     uint16_t resp_flags = 0;
 };
 
-static std::mutex   g_pending_mtx;
-static std::unordered_map<uint32_t, std::shared_ptr<PendingRequest>> g_pending;
-static std::thread  g_recv_thread;
-static std::atomic<bool> g_recv_running{false};
+struct ServerConnection {
+    std::string host;
+    int port = GPUSHARE_DEFAULT_PORT;
+    std::string transport_type = "tcp";
 
-static void recv_thread_func() {
-    /* Phase 8: capture transport pointer at thread start */
-    Transport *tp = g_transport.get();
-    while (g_recv_running.load()) {
-        gs_header_t resp_hdr;
-        if (!tp->recv(&resp_hdr, sizeof(resp_hdr))) {
-            /* Connection lost — fulfill all pending with error */
-            std::lock_guard<std::mutex> lock(g_pending_mtx);
-            for (auto &kv : g_pending) {
-                std::vector<uint8_t> empty;
-                kv.second->resp_flags = GS_FLAG_ERROR;
-                try { kv.second->promise.set_value(std::move(empty)); } catch (...) {}
-            }
-            g_pending.clear();
-            break;
-        }
-        if (!gs_header_validate(&resp_hdr)) continue;
+    std::unique_ptr<Transport> transport;
+    sock_t raw_sock = SOCK_INVALID;  /* backward compat */
+    std::mutex send_mtx;
+    std::atomic<uint32_t> req_id{1};
+    uint32_t caps = 0;
+    uint32_t session_id = 0;
+    int device_count = 0;       /* GPUs on this server */
+    int device_base = 0;        /* first global device index for this server */
 
-        uint32_t pl = resp_hdr.length - GPUSHARE_HEADER_SIZE;
-        std::vector<uint8_t> payload(pl);
-        if (pl > 0 && !tp->recv(payload.data(), pl)) {
-            std::lock_guard<std::mutex> lock(g_pending_mtx);
-            for (auto &kv : g_pending) {
-                std::vector<uint8_t> empty;
-                kv.second->resp_flags = GS_FLAG_ERROR;
-                try { kv.second->promise.set_value(std::move(empty)); } catch (...) {}
-            }
-            g_pending.clear();
-            break;
-        }
+    std::mutex pending_mtx;
+    std::unordered_map<uint32_t, std::shared_ptr<PendingRequest>> pending;
+    std::thread recv_thread;
+    std::atomic<bool> recv_running{false};
 
-        uint32_t rid = resp_hdr.req_id;
-        std::shared_ptr<PendingRequest> req;
-        {
-            std::lock_guard<std::mutex> lock(g_pending_mtx);
-            auto it = g_pending.find(rid);
-            if (it != g_pending.end()) {
-                req = it->second;
-                g_pending.erase(it);
+    bool connected() const { return transport != nullptr; }
+
+    /* ── Recv thread ─────────────────────────────────────── */
+    void start_recv() {
+        bool expected = false;
+        if (!recv_running.compare_exchange_strong(expected, true)) return;
+        recv_thread = std::thread([this]{ recv_loop(); });
+    }
+
+    void stop_recv() {
+        if (!recv_running.load()) return;
+        recv_running = false;
+        if (transport) transport->shutdown_read();
+        if (recv_thread.joinable()) recv_thread.join();
+    }
+
+    void recv_loop() {
+        Transport *tp = transport.get();
+        while (recv_running.load()) {
+            gs_header_t resp_hdr;
+            if (!tp->recv(&resp_hdr, sizeof(resp_hdr))) {
+                std::lock_guard<std::mutex> lock(pending_mtx);
+                for (auto &kv : pending) {
+                    std::vector<uint8_t> empty;
+                    kv.second->resp_flags = GS_FLAG_ERROR;
+                    try { kv.second->promise.set_value(std::move(empty)); } catch (...) {}
+                }
+                pending.clear();
+                break;
             }
-        }
-        if (req) {
-            req->resp_flags = resp_hdr.flags;
-            try { req->promise.set_value(std::move(payload)); } catch (...) {}
+            if (!gs_header_validate(&resp_hdr)) continue;
+
+            uint32_t pl = resp_hdr.length - GPUSHARE_HEADER_SIZE;
+            std::vector<uint8_t> payload(pl);
+            if (pl > 0 && !tp->recv(payload.data(), pl)) {
+                std::lock_guard<std::mutex> lock(pending_mtx);
+                for (auto &kv : pending) {
+                    std::vector<uint8_t> empty;
+                    kv.second->resp_flags = GS_FLAG_ERROR;
+                    try { kv.second->promise.set_value(std::move(empty)); } catch (...) {}
+                }
+                pending.clear();
+                break;
+            }
+
+            uint32_t rid = resp_hdr.req_id;
+            std::shared_ptr<PendingRequest> req;
+            {
+                std::lock_guard<std::mutex> lock(pending_mtx);
+                auto it = pending.find(rid);
+                if (it != pending.end()) {
+                    req = it->second;
+                    pending.erase(it);
+                }
+            }
+            if (req) {
+                req->resp_flags = resp_hdr.flags;
+                try { req->promise.set_value(std::move(payload)); } catch (...) {}
+            }
         }
     }
-}
 
-static void start_recv_thread() {
-    bool expected = false;
-    if (!g_recv_running.compare_exchange_strong(expected, true)) return;
-    g_recv_thread = std::thread(recv_thread_func);
-}
+    /* ── Pipelined RPC ───────────────────────────────────── */
+    bool rpc(uint16_t opcode, const void *req_payload, uint32_t req_len,
+             std::vector<uint8_t> &resp_payload, uint16_t *resp_flags = nullptr) {
+        auto pend = std::make_shared<PendingRequest>();
+        auto future = pend->promise.get_future();
+        uint32_t rid = req_id++;
 
-static void stop_recv_thread() {
-    if (!g_recv_running.load()) return;
-    g_recv_running = false;
-    /* Unblock recv by shutting down the read side of the transport */
-    if (g_transport) g_transport->shutdown_read();
-    if (g_recv_thread.joinable()) g_recv_thread.join();
+        { std::lock_guard<std::mutex> lock(pending_mtx); pending[rid] = pend; }
+
+        {
+            gs_header_t hdr;
+            gs_header_init(&hdr, opcode, rid, GPUSHARE_HEADER_SIZE + req_len);
+            std::lock_guard<std::mutex> lock(send_mtx);
+            if (!transport->send(&hdr, sizeof(hdr)) ||
+                (req_len > 0 && !transport->send(req_payload, req_len))) {
+                std::lock_guard<std::mutex> plock(pending_mtx);
+                pending.erase(rid);
+                return false;
+            }
+        }
+
+        resp_payload = future.get();
+        if (resp_flags) *resp_flags = pend->resp_flags;
+        if (resp_payload.empty() && (pend->resp_flags & GS_FLAG_ERROR)) return false;
+        return true;
+    }
+
+    bool rpc_flags(uint16_t opcode, uint16_t flags, const void *req_payload, uint32_t req_len,
+                   std::vector<uint8_t> &resp_payload, uint16_t *resp_flags = nullptr) {
+        auto pend = std::make_shared<PendingRequest>();
+        auto future = pend->promise.get_future();
+        uint32_t rid = req_id++;
+
+        { std::lock_guard<std::mutex> lock(pending_mtx); pending[rid] = pend; }
+
+        {
+            gs_header_t hdr;
+            gs_header_init(&hdr, opcode, rid, GPUSHARE_HEADER_SIZE + req_len);
+            hdr.flags = flags;
+            std::lock_guard<std::mutex> lock(send_mtx);
+            if (!transport->send(&hdr, sizeof(hdr)) ||
+                (req_len > 0 && !transport->send(req_payload, req_len))) {
+                std::lock_guard<std::mutex> plock(pending_mtx);
+                pending.erase(rid);
+                return false;
+            }
+        }
+
+        resp_payload = future.get();
+        if (resp_flags) *resp_flags = pend->resp_flags;
+        if (resp_payload.empty() && (pend->resp_flags & GS_FLAG_ERROR)) return false;
+        return true;
+    }
+
+    int32_t rpc_simple(uint16_t opcode, const void *req_payload, uint32_t req_len) {
+        std::vector<uint8_t> resp;
+        if (!rpc(opcode, req_payload, req_len, resp)) return cudaErrorUnknown;
+        if (resp.size() < sizeof(gs_generic_resp_t)) return cudaErrorUnknown;
+        return ((const gs_generic_resp_t*)resp.data())->cuda_error;
+    }
+
+    /* ── Cleanup ─────────────────────────────────────────── */
+    void disconnect() {
+        if (!transport) return;
+        {
+            std::lock_guard<std::mutex> lock(send_mtx);
+            gs_header_t hdr;
+            gs_header_init(&hdr, GS_OP_CLOSE, 0, GPUSHARE_HEADER_SIZE);
+            transport->send(&hdr, sizeof(hdr));
+        }
+        stop_recv();
+        transport->close();
+        transport.reset();
+        raw_sock = SOCK_INVALID;
+        { std::lock_guard<std::mutex> lock(pending_mtx); pending.clear(); }
+        caps = 0;
+    }
+};
+
+/* ── Connection state ────────────────────────────────────── */
+static std::vector<std::unique_ptr<ServerConnection>> g_servers;
+static std::mutex g_connect_mtx;  /* protects initial connection setup */
+static cudaError_t  g_last_error  = cudaSuccess;
+
+/* Legacy globals — point to the active server for backward compat */
+static sock_t       g_sock = SOCK_INVALID;
+static uint32_t     g_server_caps = 0;
+
+/* Map global device index -> (server_index, local_device_on_server) */
+struct DeviceRoute { int server_idx; int local_device; };
+static std::vector<DeviceRoute> g_device_routes;
+static int g_total_remote_devices = 0;
+
+/* Config: parsed server addresses */
+struct ServerAddr { std::string host; int port; };
+static std::vector<ServerAddr> g_server_addrs;
+
+/* Forward declarations (defined below, needed by recv thread) */
+static bool send_all(sock_t fd, const void *buf, size_t len);
+static bool recv_all(sock_t fd, void *buf, size_t len);
+
+/* Get the active ServerConnection for the current device */
+static ServerConnection *active_server() {
+    if (g_servers.empty()) return nullptr;
+    int dev = g_active_device;
+    if (g_local.available) dev = dev - g_local.local_count;
+    if (dev < 0) return nullptr;  /* local device */
+    for (auto &s : g_servers) {
+        if (dev < s->device_count) return s.get();
+        dev -= s->device_count;
+    }
+    return g_servers[0].get();  /* fallback to first server */
 }
 
 /* ── Handle mapping ──────────────────────────────────────── */
@@ -557,12 +672,30 @@ static bool recv_all(sock_t fd, void *buf, size_t len) {
 static bool g_config_loaded = false;
 
 static void parse_server_addr(const std::string &s) {
-    auto colon = s.rfind(':');
-    if (colon != std::string::npos) {
-        g_server_host = s.substr(0, colon);
-        g_server_port = atoi(s.substr(colon + 1).c_str());
-    } else {
-        g_server_host = s;
+    /* Phase 11: Support comma-separated multi-server: host1:port,host2:port */
+    g_server_addrs.clear();
+    std::string remaining = s;
+    while (!remaining.empty()) {
+        auto comma = remaining.find(',');
+        std::string addr = (comma != std::string::npos) ? remaining.substr(0, comma) : remaining;
+        remaining = (comma != std::string::npos) ? remaining.substr(comma + 1) : "";
+
+        /* Trim whitespace */
+        size_t start = addr.find_first_not_of(" \t");
+        if (start == std::string::npos) continue;
+        addr = addr.substr(start);
+        addr.erase(addr.find_last_not_of(" \t") + 1);
+
+        ServerAddr sa;
+        auto colon = addr.rfind(':');
+        if (colon != std::string::npos) {
+            sa.host = addr.substr(0, colon);
+            sa.port = atoi(addr.substr(colon + 1).c_str());
+        } else {
+            sa.host = addr;
+            sa.port = GPUSHARE_DEFAULT_PORT;
+        }
+        if (!sa.host.empty()) g_server_addrs.push_back(sa);
     }
 }
 
@@ -631,194 +764,175 @@ static void load_config() {
     init_local_gpu();
 }
 
-static bool ensure_connected() {
-    if (g_transport) return true;
+/* Connect a single ServerConnection. Returns true on success. */
+static bool connect_server(ServerConnection *sc) {
+    TRACE("Connecting to %s:%d (transport=%s)", sc->host.c_str(), sc->port,
+          sc->transport_type.c_str());
 
-    load_config();
-
-    sock_init();
-
-    TRACE("Connecting to %s:%d (transport=%s)", g_server_host.c_str(), g_server_port,
-          g_transport_type.c_str());
-
-    /* Phase 8+9: Create transport based on config */
 #ifdef GPUSHARE_HAS_RDMA
-    if (g_transport_type == "rdma") {
+    if (sc->transport_type == "rdma") {
         auto rdma = std::make_unique<RdmaTransport>();
-        if (!rdma->connect(g_server_host.c_str(), g_server_port)) {
-            ERR("RDMA connect failed to %s:%d — falling back to TCP",
-                g_server_host.c_str(), g_server_port);
-            g_transport_type = "tcp";
-            /* fall through to TCP */
-        } else {
-            g_sock = SOCK_INVALID;  /* no raw fd for RDMA */
-            g_transport = std::unique_ptr<Transport>(rdma.release());
+        if (rdma->connect(sc->host.c_str(), sc->port)) {
+            sc->raw_sock = SOCK_INVALID;
+            sc->transport = std::unique_ptr<Transport>(rdma.release());
             goto transport_ready;
         }
+        ERR("RDMA connect failed to %s:%d — falling back to TCP", sc->host.c_str(), sc->port);
+        sc->transport_type = "tcp";
     }
 #endif
     {
         auto tcp = std::make_unique<TcpTransport>();
-        if (!tcp->connect(g_server_host.c_str(), g_server_port)) {
-            ERR("Cannot connect to gpushare server at %s:%d", g_server_host.c_str(), g_server_port);
+        if (!tcp->connect(sc->host.c_str(), sc->port)) {
+            ERR("Cannot connect to %s:%d", sc->host.c_str(), sc->port);
             return false;
         }
-        tcp->optimize(true);  /* LAN settings by default */
-        g_sock = tcp->raw_fd();  /* keep g_sock for backward compat */
-        g_transport = std::unique_ptr<Transport>(tcp.release());
+        tcp->optimize(true);
+        sc->raw_sock = tcp->raw_fd();
+        sc->transport = std::unique_ptr<Transport>(tcp.release());
     }
 #ifdef GPUSHARE_HAS_RDMA
 transport_ready:
 #endif
 
-    /* Send init — done before recv thread starts, so we use transport directly */
+    /* Init handshake */
     gs_header_t hdr;
     gs_init_req_t req;
-    gs_header_init(&hdr, GS_OP_INIT, g_req_id++, GPUSHARE_HEADER_SIZE + sizeof(req));
-    req.version     = GPUSHARE_VERSION;
+    gs_header_init(&hdr, GS_OP_INIT, sc->req_id++, GPUSHARE_HEADER_SIZE + sizeof(req));
+    req.version = GPUSHARE_VERSION;
     req.client_type = 0;
-    if (!g_transport->send(&hdr, sizeof(hdr)) || !g_transport->send(&req, sizeof(req))) {
-        ERR("Failed to send init");
-        g_transport->close();
-        g_transport.reset();
-        g_sock = SOCK_INVALID;
+    if (!sc->transport->send(&hdr, sizeof(hdr)) || !sc->transport->send(&req, sizeof(req))) {
+        ERR("Failed to send init to %s:%d", sc->host.c_str(), sc->port);
+        sc->transport->close(); sc->transport.reset();
         return false;
     }
 
-    /* Read init response (before recv thread exists) */
     gs_header_t resp_hdr;
-    if (!g_transport->recv(&resp_hdr, sizeof(resp_hdr))) {
-        ERR("Failed to read init response");
-        g_transport->close();
-        g_transport.reset();
-        g_sock = SOCK_INVALID;
+    if (!sc->transport->recv(&resp_hdr, sizeof(resp_hdr))) {
+        ERR("Failed to read init response from %s:%d", sc->host.c_str(), sc->port);
+        sc->transport->close(); sc->transport.reset();
         return false;
     }
 
     uint32_t resp_pl = resp_hdr.length - GPUSHARE_HEADER_SIZE;
     std::vector<uint8_t> resp_buf(resp_pl);
-    if (resp_pl > 0 && !g_transport->recv(resp_buf.data(), resp_pl)) {
-        ERR("Failed to read init payload");
-        g_transport->close();
-        g_transport.reset();
-        g_sock = SOCK_INVALID;
+    if (resp_pl > 0 && !sc->transport->recv(resp_buf.data(), resp_pl)) {
+        sc->transport->close(); sc->transport.reset();
         return false;
     }
 
-    /* Parse init response — backward compatible with old servers */
     gs_init_resp_t resp;
     memset(&resp, 0, sizeof(resp));
     memcpy(&resp, resp_buf.data(), std::min((size_t)resp_pl, sizeof(resp)));
+    sc->caps = resp.capabilities;
+    sc->session_id = resp.session_id;
 
-    g_server_caps = resp.capabilities;
-    TRACE("Connected! Session %u, server version %u, caps=0x%x",
-          resp.session_id, resp.version, g_server_caps);
+    TRACE("Connected to %s:%d — session %u, caps=0x%x",
+          sc->host.c_str(), sc->port, sc->session_id, sc->caps);
 
-    /* Phase 4: Start dedicated recv thread for pipelined requests */
-    start_recv_thread();
+    /* Query device count from this server */
+    {
+        gs_header_t h2;
+        gs_header_init(&h2, GS_OP_GET_DEVICE_COUNT, sc->req_id++, GPUSHARE_HEADER_SIZE);
+        if (sc->transport->send(&h2, sizeof(h2))) {
+            gs_header_t rh;
+            if (sc->transport->recv(&rh, sizeof(rh)) && rh.length > GPUSHARE_HEADER_SIZE) {
+                uint32_t pl2 = rh.length - GPUSHARE_HEADER_SIZE;
+                std::vector<uint8_t> rb(pl2);
+                if (sc->transport->recv(rb.data(), pl2) && rb.size() >= sizeof(gs_device_count_resp_t)) {
+                    sc->device_count = ((const gs_device_count_resp_t*)rb.data())->count;
+                }
+            }
+        }
+        if (sc->device_count <= 0) sc->device_count = 1;  /* assume at least 1 */
+    }
+
+    sc->start_recv();
+    return true;
+}
+
+static bool ensure_connected() {
+    if (!g_servers.empty()) return true;
+
+    std::lock_guard<std::mutex> lock(g_connect_mtx);
+    if (!g_servers.empty()) return true;  /* double-check after lock */
+
+    load_config();
+    sock_init();
+
+    /* If no servers configured, use default */
+    if (g_server_addrs.empty()) {
+        g_server_addrs.push_back({"localhost", GPUSHARE_DEFAULT_PORT});
+    }
+
+    /* Phase 11: Connect to all configured servers */
+    g_device_routes.clear();
+    g_total_remote_devices = 0;
+
+    for (auto &addr : g_server_addrs) {
+        auto sc = std::make_unique<ServerConnection>();
+        sc->host = addr.host;
+        sc->port = addr.port;
+        sc->transport_type = g_transport_type;
+
+        if (!connect_server(sc.get())) {
+            TRACE("Skipping unreachable server %s:%d", addr.host.c_str(), addr.port);
+            continue;
+        }
+
+        sc->device_base = g_total_remote_devices;
+        for (int d = 0; d < sc->device_count; d++) {
+            g_device_routes.push_back({(int)g_servers.size(), d});
+        }
+        g_total_remote_devices += sc->device_count;
+        g_servers.push_back(std::move(sc));
+    }
+
+    if (g_servers.empty()) {
+        ERR("Cannot connect to any gpushare server");
+        return false;
+    }
+
+    /* Legacy compat — point globals at first server */
+    g_sock = g_servers[0]->raw_sock;
+    g_server_caps = g_servers[0]->caps;
 
     /* Phase 5: Initialize client-side pinned buffer pool */
     ensure_client_pinned();
 
+    TRACE("Connected to %zu server(s), %d remote GPU(s)", g_servers.size(), g_total_remote_devices);
     return true;
 }
 
-/* Phase 4: Pipelined RPC — multiple threads can have in-flight requests.
- * g_send_mtx serializes sends; a dedicated recv thread dispatches responses
- * to the correct caller via req_id -> promise lookup. */
+/* Phase 11: Global RPC functions route to the active server.
+ * These are the entry points used by all CUDA API implementations and
+ * by generated_stubs.cpp (via extern linkage). */
 
-/* Send request and receive response. Returns payload (caller owns the data). */
+/* Send request and receive response via the active server. */
 /* Non-static so generated_stubs.cpp can use them */
 bool rpc_call(uint16_t opcode, const void *req_payload, uint32_t req_len,
                      std::vector<uint8_t> &resp_payload, uint16_t *resp_flags = nullptr) {
-    /* Ensure connection (only one thread should do this) */
-    {
-        std::lock_guard<std::mutex> lock(g_send_mtx);
-        if (!ensure_connected()) return false;
-    }
-
-    /* Create pending request with future */
-    auto pending = std::make_shared<PendingRequest>();
-    auto future = pending->promise.get_future();
-    uint32_t rid = g_req_id++;
-
-    {
-        std::lock_guard<std::mutex> lock(g_pending_mtx);
-        g_pending[rid] = pending;
-    }
-
-    /* Send under send mutex */
-    {
-        gs_header_t hdr;
-        gs_header_init(&hdr, opcode, rid, GPUSHARE_HEADER_SIZE + req_len);
-
-        std::lock_guard<std::mutex> lock(g_send_mtx);
-        if (!g_transport->send(&hdr, sizeof(hdr)) ||
-            (req_len > 0 && !g_transport->send(req_payload, req_len))) {
-            std::lock_guard<std::mutex> plock(g_pending_mtx);
-            g_pending.erase(rid);
-            ERR("RPC send failed (opcode=0x%04x)", opcode);
-            return false;
-        }
-    }
-
-    /* Wait for recv thread to deliver our response */
-    resp_payload = future.get();
-    if (resp_flags) *resp_flags = pending->resp_flags;
-
-    if (resp_payload.empty() && (pending->resp_flags & GS_FLAG_ERROR)) {
-        ERR("RPC call failed (opcode=0x%04x), connection lost", opcode);
-        return false;
-    }
-    return true;
+    if (!ensure_connected()) return false;
+    ServerConnection *sc = active_server();
+    if (!sc) { ERR("No active server for rpc_call"); return false; }
+    return sc->rpc(opcode, req_payload, req_len, resp_payload, resp_flags);
 }
 
-/* Pipelined RPC with custom flags on the header (for chunked transfers) */
 static bool rpc_call_flags(uint16_t opcode, uint16_t flags, const void *req_payload, uint32_t req_len,
                            std::vector<uint8_t> &resp_payload, uint16_t *resp_flags = nullptr) {
-    {
-        std::lock_guard<std::mutex> lock(g_send_mtx);
-        if (!ensure_connected()) return false;
-    }
-
-    auto pending = std::make_shared<PendingRequest>();
-    auto future = pending->promise.get_future();
-    uint32_t rid = g_req_id++;
-
-    {
-        std::lock_guard<std::mutex> lock(g_pending_mtx);
-        g_pending[rid] = pending;
-    }
-
-    {
-        gs_header_t hdr;
-        gs_header_init(&hdr, opcode, rid, GPUSHARE_HEADER_SIZE + req_len);
-        hdr.flags = flags;
-
-        std::lock_guard<std::mutex> lock(g_send_mtx);
-        if (!g_transport->send(&hdr, sizeof(hdr)) ||
-            (req_len > 0 && !g_transport->send(req_payload, req_len))) {
-            std::lock_guard<std::mutex> plock(g_pending_mtx);
-            g_pending.erase(rid);
-            ERR("RPC send failed (opcode=0x%04x, flags=0x%04x)", opcode, flags);
-            return false;
-        }
-    }
-
-    resp_payload = future.get();
-    if (resp_flags) *resp_flags = pending->resp_flags;
-    if (resp_payload.empty() && (pending->resp_flags & GS_FLAG_ERROR)) return false;
-    return true;
+    if (!ensure_connected()) return false;
+    ServerConnection *sc = active_server();
+    if (!sc) return false;
+    return sc->rpc_flags(opcode, flags, req_payload, req_len, resp_payload, resp_flags);
 }
 
 /* Convenience: RPC that returns just a cuda_error */
 /* Accessible from generated_stubs.cpp */
 int32_t rpc_simple(uint16_t opcode, const void *req_payload, uint32_t req_len) {
-    std::vector<uint8_t> resp;
-    if (!rpc_call(opcode, req_payload, req_len, resp)) return cudaErrorUnknown;
-    if (resp.size() < sizeof(gs_generic_resp_t)) return cudaErrorUnknown;
-    auto *r = (const gs_generic_resp_t*)resp.data();
-    return (cudaError_t)r->cuda_error;
+    if (!ensure_connected()) return cudaErrorUnknown;
+    ServerConnection *sc = active_server();
+    if (!sc) return cudaErrorUnknown;
+    return sc->rpc_simple(opcode, req_payload, req_len);
 }
 
 /* ── CUDA Runtime API Implementation ─────────────────────── */
@@ -845,14 +959,13 @@ GPUSHARE_EXPORT cudaError_t cudaGetDeviceCount(int *count) {
         total += g_local.local_count;
     }
 
-    /* Count remote GPUs (if not local-only mode) */
+    /* Phase 11: Count remote GPUs across all servers */
     if (g_gpu_mode != "local") {
-        std::vector<uint8_t> resp;
-        if (rpc_call(GS_OP_GET_DEVICE_COUNT, nullptr, 0, resp) &&
-            resp.size() >= sizeof(gs_device_count_resp_t)) {
-            auto *r = (const gs_device_count_resp_t*)resp.data();
-            total += r->count;
+        if (!ensure_connected()) {
+            if (count) *count = total;
+            return total > 0 ? cudaSuccess : cudaErrorNoDevice;
         }
+        total += g_total_remote_devices;
     }
 
     if (count) *count = total;
@@ -1419,7 +1532,6 @@ static CUresult cache_device_props() {
 GPUSHARE_EXPORT CUresult cuInit(unsigned int flags) {
     TRACE("cuInit(%u)", flags);
     (void)flags;
-    std::lock_guard<std::mutex> lock(g_send_mtx);
     if (!ensure_connected()) return CUDA_ERROR_NO_DEVICE;
     return CUDA_SUCCESS;
 }
@@ -1849,7 +1961,6 @@ static nvmlDevice_t g_nvml_device = (nvmlDevice_t)&g_nvml_dev_sentinel;
 
 GPUSHARE_EXPORT nvmlReturn_t nvmlInit(void) {
     TRACE("nvmlInit");
-    std::lock_guard<std::mutex> lock(g_send_mtx);
     if (!ensure_connected()) return NVML_ERROR_NOT_FOUND;
     g_nvml_initialized = true;
     return NVML_SUCCESS;
@@ -2126,26 +2237,14 @@ GPUSHARE_EXPORT const char* nvmlErrorString(nvmlReturn_t result) {
 /* ── Cleanup ─────────────────────────────────────────────── */
 
 static void GPUSHARE_DESTRUCTOR gpushare_cleanup(void) {
-    if (g_transport) {
-        /* Send close message before tearing down */
-        {
-            std::lock_guard<std::mutex> lock(g_send_mtx);
-            gs_header_t hdr;
-            gs_header_init(&hdr, GS_OP_CLOSE, 0, GPUSHARE_HEADER_SIZE);
-            g_transport->send(&hdr, sizeof(hdr));
-        }
-        /* Stop recv thread (will unblock via shutdown) */
-        stop_recv_thread();
-        g_transport->close();
-        g_transport.reset();
-        g_sock = SOCK_INVALID;
-        TRACE("Disconnected from server");
+    /* Phase 11: Disconnect all servers */
+    for (auto &sc : g_servers) {
+        if (sc) sc->disconnect();
     }
-    /* Clear any remaining pending requests */
-    {
-        std::lock_guard<std::mutex> lock(g_pending_mtx);
-        g_pending.clear();
-    }
+    g_servers.clear();
+    g_device_routes.clear();
+    g_total_remote_devices = 0;
+    g_sock = SOCK_INVALID;
     g_server_caps = 0;
     /* Phase 5: Clean up client-side pinned pool */
     if (g_client_pinned_initialized) {
@@ -2171,33 +2270,28 @@ static void GPUSHARE_DESTRUCTOR gpushare_cleanup(void) {
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     (void)hinstDLL;
     if (fdwReason == DLL_PROCESS_DETACH) {
-        /* Signal recv thread to stop */
-        g_recv_running = false;
-        if (g_transport) {
-            /* Send close message best-effort */
-            gs_header_t hdr;
-            gs_header_init(&hdr, GS_OP_CLOSE, 0, GPUSHARE_HEADER_SIZE);
-            g_transport->send(&hdr, sizeof(hdr));
-            /* Unblock recv thread */
-            g_transport->shutdown_read();
+        /* Phase 11: Disconnect all servers */
+        for (auto &sc : g_servers) {
+            if (!sc) continue;
+            sc->recv_running = false;
+            if (sc->transport) {
+                gs_header_t hdr;
+                gs_header_init(&hdr, GS_OP_CLOSE, 0, GPUSHARE_HEADER_SIZE);
+                sc->transport->send(&hdr, sizeof(hdr));
+                sc->transport->shutdown_read();
+            }
+            if (lpvReserved == NULL) {
+                if (sc->recv_thread.joinable()) sc->recv_thread.join();
+            } else {
+                if (sc->recv_thread.joinable()) sc->recv_thread.detach();
+            }
+            if (sc->transport) { sc->transport->close(); sc->transport.reset(); }
+            { std::lock_guard<std::mutex> lock(sc->pending_mtx); sc->pending.clear(); }
         }
-        if (lpvReserved == NULL) {
-            /* Dynamic unload (FreeLibrary) — safe to join */
-            if (g_recv_thread.joinable()) g_recv_thread.join();
-        } else {
-            /* Process exit — NOT safe to join (loader lock held).
-             * Detach and let the OS tear down the thread. */
-            if (g_recv_thread.joinable()) g_recv_thread.detach();
-        }
-        if (g_transport) {
-            g_transport->close();
-            g_transport.reset();
-        }
+        g_servers.clear();
+        g_device_routes.clear();
+        g_total_remote_devices = 0;
         g_sock = SOCK_INVALID;
-        {
-            std::lock_guard<std::mutex> lock(g_pending_mtx);
-            g_pending.clear();
-        }
         g_server_caps = 0;
         if (g_client_pinned_initialized) {
             g_client_pinned.destroy();
