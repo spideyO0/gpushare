@@ -91,10 +91,10 @@ All structs use `PACKED_STRUCT_BEGIN`/`PACKED_STRUCT_END` macros for MSVC portab
 
 All scripts support: `--force` (full reinstall), upgrade detection (IS_UPGRADE), config preservation, stale CMake cache cleaning.
 
-- `install-server-arch.sh`: Arch Linux server setup, systemd services, codegen step, firewall
+- `install-server-arch.sh`: Arch Linux server setup, systemd services, codegen step, firewall, creates CUDA symlinks + ldconfig + backs up real libs + installs client.conf for dual-GPU support on the server machine itself
 - `install-client-linux.sh`: 9 distro families auto-detected, auto-installs deps, SELinux/AppArmor handling, 32+ symlinks
 - `install-client-macos.sh`: Homebrew deps, quarantine clearing on ALL files, launchd plist, SIP-safe shebangs
-- `install-client-windows.ps1`: VS/MinGW/MSYS2 auto-detect, version-to-year mapping for CMake generator, 12 DLL copies, registry GPU adapter, Defender exclusion, startup shortcut for tray widget
+- `install-client-windows.ps1`: VS/MinGW/MSYS2 auto-detect, version-to-year mapping for CMake generator, 12 DLL copies, registry GPU adapter, Defender exclusion, startup shortcut for tray widget, backs up real CUDA DLLs to `C:\Program Files\gpushare\real\` before any overrides
 - `uninstall.sh`: Cross-platform (Linux/macOS), dry-run support
 - `uninstall-windows.ps1`: 9-component removal including tray process kill, registry cleanup, startup shortcut
 
@@ -112,6 +112,7 @@ All scripts support: `--force` (full reinstall), upgrade detection (IS_UPGRADE),
 10. **Struct packing Python**: gs_device_props_t is 352 bytes packed. Python format: `"<QQ" + "i"*14 + "QQQ"` at offset 256 after the name field.
 11. **DllMain loader lock deadlock**: On Windows, calling `join()` on the recv thread inside `DllMain(DLL_PROCESS_DETACH)` deadlocks because the loader lock prevents the thread from exiting. Use `detach()` instead and let the OS clean up.
 12. **Client pthread linking**: The pipelined recv thread requires `-lpthread` on Linux/macOS. CMakeLists.txt must link pthread for the client on non-Windows platforms.
+13. **Windows CUDA_VISIBLE_DEVICES**: NEVER set `CUDA_VISIBLE_DEVICES` to a remote GPU index — it makes CUDA see 0 devices. Use `torch.cuda.set_device()` for remote GPUs instead.
 
 ## How to test
 
@@ -153,7 +154,8 @@ grep -Pn '[^\x00-\x7F]' scripts/install-client-windows.ps1 scripts/uninstall-win
 - **Config file over env vars**: Env vars don't persist across sessions and break in venvs. Config files at well-known paths work everywhere.
 - **LAN/WAN auto-detect**: Server checks client IP against local interface subnets. No user configuration needed.
 - **Per-client thread model**: Simple, each client gets full CUDA context. Trade-off: more memory per client, but simpler than async multiplexing.
-- **Local GPU passthrough**: When a local NVIDIA GPU exists, the client detects it via dlopen of real CUDA libraries from `/usr/local/lib/gpushare/real/` (backed up by install script). Both local and remote GPUs are presented to applications. Device 0..N-1 are local, device N+ are remote. `cudaSetDevice()` routes all subsequent calls. Config: `gpu_mode=all|remote|local` in client.conf, or `GPUSHARE_GPU_MODE` env var. Requires `RTLD_DEEPBIND` to prevent symbol conflicts.
+- **Local GPU passthrough**: When a local NVIDIA GPU exists, the client detects it via dlopen of real CUDA libraries from `/usr/local/lib/gpushare/real/` (Linux/macOS) or `C:\Program Files\gpushare\real\` (Windows, using LoadLibraryExA/GetProcAddress). Both local and remote GPUs are presented to applications. Device 0..N-1 are local, device N+ are remote. `cudaSetDevice()` routes all subsequent calls. Config: `gpu_mode=all|remote|local` in client.conf, or `GPUSHARE_GPU_MODE` env var. Requires `RTLD_DEEPBIND` on Linux to prevent symbol conflicts. On Windows with a local GPU, DLL replacement is NOT used (breaks PyTorch c10_cuda.dll); instead the Python startup hook handles remote GPU detection. On Windows without a local GPU, full DLL replacement works (nvcuda.dll, cudart64_*.dll in Python directories).
+- **Python startup hook**: `python/gpushare_hook.py` + `python/gpushare.pth` monkey-patches `torch.cuda` at import time to include remote GPUs. Patches: `device_count`, `get_device_properties`, `get_device_name`, `set_device`, `current_device`, `memory_allocated`, `mem_get_info`, `is_available`. Suppresses SM compatibility warnings for remote GPUs. No code changes needed in user applications.
 
 ## File layout
 
@@ -172,9 +174,12 @@ dashboard/app.py            — Web dashboard (1147 lines, zero dependencies)
 tui/monitor.py              — Terminal UI (891 lines, curses only)
 client/gpu_tray_windows.pyw — Windows tray widget (pystray + pillow)
 python/gpushare/__init__.py — Python client library
+python/gpushare_hook.py     — Python startup hook: monkey-patches torch.cuda for remote GPUs
+python/gpushare.pth         — Python path config to auto-load gpushare_hook at startup
 scripts/nvidia-smi          — nvidia-smi shim (Python, ctypes → NVML)
 examples/stress_test.py     — Stress test + connection validator
 examples/gpu.py             — GPU detection (4 methods)
+examples/fooocus_gpu_patch.py — Drop-in GPU detection for PyTorch launchers (e.g., Fooocus)
 CMakeLists.txt              — Build: server (needs CUDA) + client (no CUDA)
 ```
 

@@ -1144,6 +1144,7 @@ GPUSHARE_EXPORT cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop,
         size_t len = strlen(prop->name);
         if (len + 10 < sizeof(prop->name))
             strcat(prop->name, " (remote)");
+        /* ── Fields from server response ── */
         prop->totalGlobalMem     = r->total_global_mem;
         prop->sharedMemPerBlock  = r->shared_mem_per_block;
         prop->regsPerBlock       = r->regs_per_block;
@@ -1161,8 +1162,30 @@ GPUSHARE_EXPORT cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop,
         prop->multiProcessorCount= r->multi_processor_count;
         prop->maxThreadsPerMultiProcessor = r->max_threads_per_mp;
         prop->totalConstMem      = r->total_const_mem;
-        prop->memoryBusWidth     = r->mem_bus_width;
-        prop->l2CacheSize        = r->l2_cache_size;
+        prop->memoryBusWidth     = (int)r->mem_bus_width;
+        prop->l2CacheSize        = (int)r->l2_cache_size;
+
+        /* ── Fill fields PyTorch reads that the server doesn't transmit ── */
+        prop->memPitch             = 2147483647;
+        prop->textureAlignment     = 512;
+        prop->texturePitchAlignment= 32;
+        prop->deviceOverlap        = 1;
+        prop->canMapHostMemory     = 1;
+        prop->concurrentKernels    = 1;
+        prop->unifiedAddressing    = 1;
+        prop->managedMemory        = 1;
+        prop->concurrentManagedAccess = 1;
+        prop->computePreemptionSupported = 1;
+        prop->cooperativeLaunch    = 1;
+        prop->asyncEngineCount     = 2;
+        prop->streamPrioritiesSupported = 1;
+        prop->globalL1CacheSupported = 1;
+        prop->localL1CacheSupported  = 1;
+        prop->sharedMemPerMultiprocessor = r->shared_mem_per_block > 0
+            ? r->shared_mem_per_block * 2 : 166912;
+        prop->regsPerMultiprocessor = 65536;
+        prop->maxBlocksPerMultiProcessor = 32;
+        prop->pageableMemoryAccess = 1;
     }
     return cudaSuccess;
 }
@@ -1575,12 +1598,13 @@ GPUSHARE_EXPORT cudaError_t cudaDeviceReset(void) {
     return cudaSuccess;
 }
 
+/* Forward declaration — cuDeviceGetAttribute is defined in the driver API section below */
+extern "C" GPUSHARE_EXPORT CUresult cuDeviceGetAttribute(int *pi, CUdevice_attribute attrib, CUdevice dev);
+
 GPUSHARE_EXPORT cudaError_t cudaDeviceGetAttribute(int *value, int attr, int device) {
-    /* Stub - forward as device props query */
-    (void)attr;
-    (void)device;
-    if (value) *value = 0;
-    return cudaSuccess;
+    /* Forward to driver API implementation which has full attribute coverage */
+    CUresult r = cuDeviceGetAttribute(value, (CUdevice_attribute)attr, (CUdevice)device);
+    return (r == CUDA_SUCCESS) ? cudaSuccess : cudaErrorInvalidValue;
 }
 
 GPUSHARE_EXPORT cudaError_t cudaEventCreateWithFlags(cudaEvent_t *event, unsigned int flags) {
@@ -1729,6 +1753,7 @@ GPUSHARE_EXPORT CUresult cuDeviceGetAttribute(int *pi, CUdevice_attribute attrib
     if (!pi) return CUDA_ERROR_INVALID_VALUE;
 
     switch (attrib) {
+        /* ── From cached device properties ── */
         case CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK:          *pi = g_cached_props.max_threads_per_block; break;
         case CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X:                *pi = g_cached_props.max_threads_dim[0]; break;
         case CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y:                *pi = g_cached_props.max_threads_dim[1]; break;
@@ -1745,11 +1770,45 @@ GPUSHARE_EXPORT CUresult cuDeviceGetAttribute(int *pi, CUdevice_attribute attrib
         case CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR:       *pi = g_cached_props.major; break;
         case CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR:       *pi = g_cached_props.minor; break;
         case CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR: *pi = g_cached_props.max_threads_per_mp; break;
+        case CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE:                  *pi = (int)g_cached_props.l2_cache_size; break;
+        case CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH:        *pi = (int)g_cached_props.mem_bus_width; break;
+
+        /* ── Capabilities true for all modern GPUs (Kepler+) ── */
         case CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING:             *pi = 1; break;
         case CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY:                 *pi = 1; break;
         case CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS:      *pi = 1; break;
+        case CU_DEVICE_ATTRIBUTE_CAN_MAP_HOST_MEMORY:            *pi = 1; break;
+        case CU_DEVICE_ATTRIBUTE_CONCURRENT_KERNELS:             *pi = 1; break;
+        case CU_DEVICE_ATTRIBUTE_GPU_OVERLAP:                    *pi = 1; break;
+        case CU_DEVICE_ATTRIBUTE_ASYNC_ENGINE_COUNT:             *pi = 2; break;
+        case CU_DEVICE_ATTRIBUTE_STREAM_PRIORITIES_SUPPORTED:    *pi = 1; break;
+        case CU_DEVICE_ATTRIBUTE_GLOBAL_L1_CACHE_SUPPORTED:      *pi = 1; break;
+        case CU_DEVICE_ATTRIBUTE_LOCAL_L1_CACHE_SUPPORTED:       *pi = 1; break;
+        case CU_DEVICE_ATTRIBUTE_COOPERATIVE_LAUNCH:             *pi = 1; break;
+        case CU_DEVICE_ATTRIBUTE_COMPUTE_PREEMPTION_SUPPORTED:   *pi = 1; break;
+        case CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS:         *pi = 1; break;
+
+        /* ── Sensible defaults for remaining PyTorch-queried attrs ── */
+        case CU_DEVICE_ATTRIBUTE_MAX_PITCH:                      *pi = 2147483647; break;
+        case CU_DEVICE_ATTRIBUTE_TEXTURE_ALIGNMENT:              *pi = 512; break;
+        case CU_DEVICE_ATTRIBUTE_KERNEL_EXEC_TIMEOUT:            *pi = 0; break;
+        case CU_DEVICE_ATTRIBUTE_INTEGRATED:                     *pi = 0; break;
+        case CU_DEVICE_ATTRIBUTE_COMPUTE_MODE:                   *pi = 0; break;
+        case CU_DEVICE_ATTRIBUTE_ECC_ENABLED:                    *pi = 0; break;
+        case CU_DEVICE_ATTRIBUTE_PCI_BUS_ID:                     *pi = 0; break;
+        case CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID:                  *pi = 0; break;
+        case CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID:                  *pi = 0; break;
+        case CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE:              *pi = 0; break;
+        case CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR:
+            *pi = g_cached_props.shared_mem_per_block > 0 ? (int)(g_cached_props.shared_mem_per_block * 2) : 166912;
+            break;
+        case CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR: *pi = 65536; break;
+        case CU_DEVICE_ATTRIBUTE_MULTI_GPU_BOARD:                *pi = 0; break;
+        case CU_DEVICE_ATTRIBUTE_MAX_BLOCKS_PER_MULTIPROCESSOR:  *pi = 32; break;
         case CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED:         *pi = 0; break;
-        default: *pi = 0; break;  /* Unknown attrs return 0 — safe default */
+        case CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED: *pi = 0; break;
+
+        default: *pi = 0; break;
     }
     return CUDA_SUCCESS;
 }

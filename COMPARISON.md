@@ -53,7 +53,7 @@ Both projects share the same goal: make a remote NVIDIA GPU accessible over the 
 | Linux distro detection | None | 9 package managers auto-detected |
 | macOS (native) | No (Docker only) | Native dylib symlinks |
 | macOS (SIP handling) | N/A | Quarantine clearing, full-path shebangs |
-| Windows | No | DLL copies + registry + tray widget |
+| Windows | No | DLL copies + registry + tray widget + PyTorch hook for dual-GPU |
 | Python venvs | Broken (LD_PRELOAD per-session) | Works (libcuda.so.1 from system) |
 
 ### SCUDA on Linux
@@ -228,7 +228,7 @@ This 10% gap is closable — adding a function to gpushare's codegen is one line
 
 ---
 
-## 9. Feature matrix (49 features)
+## 9. Feature matrix (50 features)
 
 | # | Feature | SCUDA | gpushare |
 |---|---|---|---|
@@ -281,8 +281,9 @@ This 10% gap is closable — adding a function to gpushare's codegen is one line
 | 47 | Async memcpy support | No | Yes |
 | 48 | Request pipelining (concurrent RPCs) | No | Yes |
 | 49 | Capability negotiation (backward-compat) | No | Yes |
+| 50 | PyTorch startup hook (dual-GPU) | No | Yes |
 
-**SCUDA: 5/49 features. gpushare: 49/49 features.**
+**SCUDA: 5/50 features. gpushare: 50/50 features.**
 
 ---
 
@@ -292,7 +293,7 @@ This 10% gap is closable — adding a function to gpushare's codegen is one line
 |---|---|
 | Quick CUDA test on Linux with CUDA 12.x | Either works |
 | Production ML training on LAN | **gpushare** (stability, monitoring, service management) |
-| macOS or Windows client | **gpushare** (SCUDA doesn't support these) |
+| macOS or Windows client | **gpushare** (SCUDA doesn't support these; Windows PyTorch hook enables transparent remote GPU access) |
 | CUDA 13.x or RTX 5070 | **gpushare** (SCUDA segfaults) |
 | Need cuFFT/cuSPARSE/cuSOLVER | **gpushare** (SCUDA doesn't have these) |
 | Multiple clients sharing one GPU | **gpushare** (per-client stats, connection limits) |

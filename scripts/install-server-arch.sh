@@ -228,8 +228,11 @@ backup_lib "libcudart.so"
 backup_lib "libcuda.so.1"
 backup_lib "libnvidia-ml.so.1"
 
-# Create symlinks so applications load gpushare instead of real CUDA
-info "Creating CUDA symlinks..."
+# Create CUDA symlinks in the gpushare directory (used by local GPU passthrough).
+# On the server, the REAL CUDA libs in /opt/cuda/lib64 and /usr/lib MUST keep
+# priority — the server daemon needs them. The Python hook handles remote GPU
+# visibility via ctypes without overriding system libraries.
+info "Creating CUDA symlinks (for passthrough reference)..."
 for link in libcudart.so libcudart.so.12 libcudart.so.13 libcudart.so.13.0 \
             libcuda.so libcuda.so.1 \
             libnvidia-ml.so libnvidia-ml.so.1 \
@@ -244,20 +247,18 @@ for link in libcudart.so libcudart.so.12 libcudart.so.13 libcudart.so.13.0 \
             libnvjpeg.so libnvjpeg.so.12; do
     ln -sf libgpushare_client.so "$LIB_DIR/$link"
 done
+# Fix soname symlink (ldconfig creates a confusing chain otherwise)
+ln -sf libgpushare_client.so "$LIB_DIR/libgpushare_client.so.1"
 ok "All CUDA symlinks created"
 
-# Configure dynamic linker
+# Configure dynamic linker — add our dir so libgpushare_client.so.1 is findable
 echo "$LIB_DIR" > /etc/ld.so.conf.d/gpushare.conf
 ldconfig
-ok "ldconfig updated — $LIB_DIR takes priority"
+ok "ldconfig updated"
 
-# Verify
-resolved=$(ldconfig -p 2>/dev/null | grep "libcudart.so " | head -1 || true)
-if echo "$resolved" | grep -q gpushare; then
-    ok "Verified: libcudart.so resolves to gpushare"
-else
-    warn "libcudart.so may not resolve to gpushare (check: ldconfig -p | grep libcudart)"
-fi
+# On the server, real CUDA keeping priority is CORRECT (server daemon needs it).
+# The Python hook + ctypes handles remote GPU detection without library overrides.
+ok "Server mode: real CUDA libs keep priority (correct for server daemon)"
 
 # ── 4. Install config ────────────────────────────────────────────────────────
 info "Installing configuration..."

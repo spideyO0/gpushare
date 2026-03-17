@@ -508,58 +508,80 @@ fi
 if [[ "$NO_SYMLINKS" == false ]]; then
     info "Creating transparent CUDA symlinks..."
 
-    # libcudart.so variants — applications looking for any of these will
-    # find our client library instead, transparently forwarding to remote GPU.
-    ln -sf libgpushare_client.so "$LIB_DIR/libcudart.so"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcudart.so.11"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcudart.so.11.0"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcudart.so.12"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcudart.so.12.0"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcudart.so.13"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcudart.so.13.0"
+    # Determine the system library directory where the dynamic linker looks.
+    # Symlinks MUST go in /usr/lib (or /usr/lib64) because:
+    # - ldconfig ignores symlinks whose target has a different SONAME
+    # - The dynamic linker only searches /lib, /usr/lib, and the ldconfig cache
+    # - Putting symlinks in a subdirectory does NOT make them findable
+    SYS_LIB_DIR="/usr/lib"
+    if [[ -d /usr/lib64 ]] && [[ ! -L /usr/lib64 ]]; then
+        SYS_LIB_DIR="/usr/lib64"
+    fi
 
-    # Driver API (libcuda.so.1) — PyTorch/TF/JAX load this from system
-    # even when they bundle their own libcudart. Provides native venv support.
-    ln -sf libgpushare_client.so "$LIB_DIR/libcuda.so"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcuda.so.1"
+    # All CUDA library names that should resolve to gpushare
+    CUDA_SYMLINKS=(
+        libcudart.so libcudart.so.11 libcudart.so.11.0
+        libcudart.so.12 libcudart.so.12.0 libcudart.so.13 libcudart.so.13.0
+        libcuda.so libcuda.so.1
+        libnvidia-ml.so libnvidia-ml.so.1
+        libcublas.so libcublas.so.11 libcublas.so.12 libcublas.so.13
+        libcublasLt.so libcublasLt.so.11 libcublasLt.so.12 libcublasLt.so.13
+        libcudnn.so libcudnn.so.8 libcudnn.so.9
+        libcufft.so libcufft.so.11
+        libcusparse.so libcusparse.so.12
+        libcusolver.so libcusolver.so.11
+        libcurand.so libcurand.so.10
+        libnvrtc.so libnvrtc.so.12
+        libnvjpeg.so libnvjpeg.so.12
+    )
 
-    # NVML (libnvidia-ml) — GPU detection for apps, monitoring tools
-    ln -sf libgpushare_client.so "$LIB_DIR/libnvidia-ml.so"
-    ln -sf libgpushare_client.so "$LIB_DIR/libnvidia-ml.so.1"
+    # Create symlinks in the gpushare directory (for reference/organization)
+    for link in "${CUDA_SYMLINKS[@]}"; do
+        ln -sf libgpushare_client.so "$LIB_DIR/$link"
+    done
+    # Fix soname symlink (prevent ldconfig from creating a confusing chain)
+    ln -sf libgpushare_client.so "$LIB_DIR/libgpushare_client.so.1"
 
-    # cuBLAS
-    ln -sf libgpushare_client.so "$LIB_DIR/libcublas.so"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcublas.so.11"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcublas.so.12"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcublas.so.13"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcublasLt.so"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcublasLt.so.11"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcublasLt.so.12"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcublasLt.so.13"
-    # cuDNN
-    ln -sf libgpushare_client.so "$LIB_DIR/libcudnn.so"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcudnn.so.8"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcudnn.so.9"
-    # cuFFT
-    ln -sf libgpushare_client.so "$LIB_DIR/libcufft.so"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcufft.so.11"
-    # cuSPARSE
-    ln -sf libgpushare_client.so "$LIB_DIR/libcusparse.so"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcusparse.so.12"
-    # cuSOLVER
-    ln -sf libgpushare_client.so "$LIB_DIR/libcusolver.so"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcusolver.so.11"
-    # cuRAND
-    ln -sf libgpushare_client.so "$LIB_DIR/libcurand.so"
-    ln -sf libgpushare_client.so "$LIB_DIR/libcurand.so.10"
-    # NVRTC
-    ln -sf libgpushare_client.so "$LIB_DIR/libnvrtc.so"
-    ln -sf libgpushare_client.so "$LIB_DIR/libnvrtc.so.12"
-    # nvJPEG
-    ln -sf libgpushare_client.so "$LIB_DIR/libnvjpeg.so"
-    ln -sf libgpushare_client.so "$LIB_DIR/libnvjpeg.so.12"
+    # Create symlinks in the SYSTEM library directory so the dynamic linker
+    # can actually find them. These point to the absolute path of our library.
+    local target="$LIB_DIR/libgpushare_client.so"
+    local created=0
+    local skipped=0
+    for link in "${CUDA_SYMLINKS[@]}"; do
+        local sys_path="$SYS_LIB_DIR/$link"
+        # Back up any existing real CUDA library before overriding
+        if [[ -e "$sys_path" ]] && [[ ! -L "$sys_path" ]]; then
+            # It's a real file (not a symlink) — back it up
+            mkdir -p "$LIB_DIR/real"
+            if [[ ! -f "$LIB_DIR/real/$link" ]]; then
+                cp "$sys_path" "$LIB_DIR/real/$link"
+                info "Backed up $sys_path to $LIB_DIR/real/$link"
+            fi
+        elif [[ -L "$sys_path" ]]; then
+            local existing_target
+            existing_target=$(readlink -f "$sys_path" 2>/dev/null || true)
+            if [[ "$existing_target" == *gpushare* ]]; then
+                skipped=$((skipped + 1))
+                continue  # already points to gpushare
+            fi
+            # Symlink to something else (e.g., real NVIDIA driver) — back up target
+            if [[ -f "$existing_target" ]] && [[ "$existing_target" != *gpushare* ]]; then
+                mkdir -p "$LIB_DIR/real"
+                if [[ ! -f "$LIB_DIR/real/$link" ]]; then
+                    cp "$existing_target" "$LIB_DIR/real/$link"
+                    info "Backed up $link (from $existing_target)"
+                fi
+            fi
+        fi
+        ln -sf "$target" "$sys_path"
+        created=$((created + 1))
+    done
 
-    ok "All CUDA library symlinks created (runtime + driver + NVML + cuBLAS + cuDNN + cuFFT + cuSPARSE + cuSOLVER + cuRAND + NVRTC)"
+    if [[ $skipped -gt 0 ]]; then
+        ok "CUDA symlinks: $created created, $skipped already correct"
+    else
+        ok "All $created CUDA library symlinks created in $SYS_LIB_DIR"
+    fi
 
     # ── 5. Configure dynamic linker (distro-specific) ─────────────────────────
     info "Configuring dynamic linker..."
@@ -589,22 +611,28 @@ MUSLEOF
             fi
             ;;
         *)
-            # Standard glibc distros: use ld.so.conf.d + ldconfig
+            # Standard glibc distros: update ldconfig cache
             echo "$LIB_DIR" > /etc/ld.so.conf.d/gpushare.conf
-            if [[ "$LIB_UPDATED" == true ]]; then
-                ldconfig
-                ok "ldconfig updated — $LIB_DIR is now in the library search path"
-            else
-                ok "Library unchanged — ldconfig skipped"
-            fi
+            ldconfig
+            ok "ldconfig updated"
 
-            # Verify it takes priority
-            resolved=$(ldconfig -p 2>/dev/null | grep "libcudart.so " | head -1 || true)
+            # Verify the critical library resolves correctly
+            resolved=$(ldconfig -p 2>/dev/null | grep "libcuda.so.1 " | head -1 || true)
             if echo "$resolved" | grep -q gpushare; then
-                ok "Verified: libcudart.so resolves to gpushare"
+                ok "Verified: libcuda.so.1 resolves to gpushare"
             else
-                warn "libcudart.so may not resolve to gpushare (another CUDA path has priority)"
-                warn "Check: ldconfig -p | grep libcudart"
+                # Symlinks in /usr/lib are found by the dynamic linker even without
+                # ldconfig cache entries (it's a hardcoded default search path)
+                if [[ -L "$SYS_LIB_DIR/libcuda.so.1" ]]; then
+                    target_check=$(readlink -f "$SYS_LIB_DIR/libcuda.so.1" 2>/dev/null || true)
+                    if [[ "$target_check" == *gpushare* ]]; then
+                        ok "Verified: $SYS_LIB_DIR/libcuda.so.1 -> gpushare (via default path)"
+                    else
+                        warn "libcuda.so.1 in $SYS_LIB_DIR does not point to gpushare"
+                    fi
+                else
+                    warn "libcuda.so.1 symlink not found in $SYS_LIB_DIR"
+                fi
             fi
             ;;
     esac

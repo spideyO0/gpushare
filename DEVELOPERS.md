@@ -90,6 +90,8 @@ Server-side GPU pointers are opaque `uint64_t` values. On 64-bit clients, these 
 - `ssize_t` is typedef'd to `SSIZE_T` on Windows
 - Library cleanup uses `__attribute__((destructor))` on POSIX, `DllMain` on Windows
 
+**Windows local GPU passthrough:** On Windows, local GPU passthrough is implemented using `LoadLibraryExA`/`GetProcAddress` (instead of `dlopen`/`dlsym` on POSIX). The client searches for real CUDA DLLs in the following order: `C:\Program Files\gpushare\real\`, `System32`, and `%CUDA_PATH%\bin`. This allows the client to load the genuine NVIDIA libraries for local GPU operations while still intercepting calls destined for the remote GPU.
+
 ### 1.3 Generated Stubs (codegen/)
 
 The code generation system has two tiers:
@@ -186,6 +188,27 @@ Provides a Pythonic API: `connect()`, `malloc()`, `free()`, `memcpy_h2d()`, `mem
 System tray widget for Windows using `pystray` and `pillow`. Shows remote GPU stats (temperature, utilization, VRAM) in the system tray with hover tooltip and right-click menu. Communicates with the gpushare server via raw sockets using the binary protocol (no DLL dependency).
 
 Run with `pythonw gpu_tray_windows.pyw` for no console window.
+
+### 1.9 PyTorch Startup Hook (`python/gpushare_hook.py`, `python/gpushare.pth`)
+
+A Python import hook that enables PyTorch to use remote GPUs without DLL/symlink interception. The client installer copies `gpushare_hook.py` and `gpushare.pth` into the Python `site-packages` directory. The `.pth` file causes Python to execute the hook at interpreter startup.
+
+**Mechanism:** Uses a `MetaPathFinder` to detect `import torch.cuda` and patches the module after loading. The following functions are patched to route through gpushare:
+
+- `torch.cuda.device_count`
+- `torch.cuda.get_device_properties`
+- `torch.cuda.get_device_name`
+- `torch.cuda.set_device`
+- `torch.cuda.current_device`
+- `torch.cuda.memory_allocated`
+- `torch.cuda.mem_get_info`
+- `torch.cuda.is_available`
+
+**SM compatibility warning suppression:** The hook suppresses PyTorch's SM architecture compatibility warnings for remote GPUs, since the actual compute happens on the server where the hardware is present.
+
+**When it is required:** On Windows with a local NVIDIA GPU, DLL replacement is not viable because `nvcuda.dll` in `System32` is locked by the NVIDIA driver and cannot be overwritten, and PyTorch's `c10_cuda.dll` depends on real `nvcuda.dll` functions that gpushare does not export. The Python hook is the only supported approach in this configuration.
+
+**When it is optional:** On Linux and macOS, the hook works as an alternative to the standard DLL/symlink interception approach. It can be useful in environments where modifying system library paths is undesirable (e.g., virtual environments, containers).
 
 ---
 
@@ -384,6 +407,22 @@ cmake .. -DCUDAToolkit_ROOT=/opt/cuda
 **Root cause:** The config parser treated `bind_address=0.0.0.0` as a specific IPv4 address and bound to it explicitly, rather than interpreting it as "listen on all interfaces".
 
 **Fix:** Treat `"0.0.0.0"` and `"::"` the same as an empty bind address (use IPv6 `in6addr_any` with dual-stack).
+
+### Bug 20: CUDA_VISIBLE_DEVICES with remote GPU index
+
+**Symptom:** Setting `CUDA_VISIBLE_DEVICES` to a remote device index (e.g., `CUDA_VISIBLE_DEVICES=1` when device 1 is the remote GPU) causes CUDA to report 0 available devices.
+
+**Root cause:** `CUDA_VISIBLE_DEVICES` is processed by the real CUDA runtime before gpushare can intercept it. The runtime filters the device list to only include physical GPUs matching the specified indices. Since the remote GPU is not a physical device on the local machine, CUDA filters it out and sees no valid devices.
+
+**Fix:** Do not use `CUDA_VISIBLE_DEVICES` to select a remote GPU. Use `torch.cuda.set_device()` (or `cudaSetDevice()`) instead to select the remote device at runtime.
+
+### Bug 21: Windows DLL search order blocks nvcuda.dll replacement
+
+**Symptom:** PyTorch fails to initialize CUDA when gpushare's `nvcuda.dll` is placed in the application directory or on PATH.
+
+**Root cause:** Windows DLL search order is: application directory, then `System32`, then `PATH`. The real `nvcuda.dll` in `System32` is locked by the NVIDIA display driver and cannot be overwritten or renamed. Even if gpushare's DLL is found first, PyTorch's `c10_cuda.dll` is linked against functions in the real `nvcuda.dll` that gpushare does not export, causing load failures.
+
+**Fix:** Use the Python startup hook (Section 1.9) instead of DLL replacement for PyTorch on Windows. The hook patches PyTorch's CUDA functions at the Python level, avoiding the DLL search order problem entirely.
 
 ---
 
