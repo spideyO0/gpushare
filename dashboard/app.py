@@ -1105,10 +1105,53 @@ def main():
         "--mode", type=str, choices=["server", "client"], default=None,
         help="Explicit mode selection (alternative to --client flag)",
     )
+    parser.add_argument(
+        "--config", type=str, default=None,
+        help="Path to gpushare client.conf (reads server= address from it)",
+    )
     args = parser.parse_args()
+
+    # Read server address from config file if --config is given
+    config_parsed_server = None
+    if args.config and os.path.isfile(args.config):
+        try:
+            with open(args.config) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("server="):
+                        addr = line[7:].strip()
+                        if addr:
+                            config_parsed_server = addr
+        except Exception:
+            pass
+    if config_parsed_server and args.server == DEFAULT_GS_SERVER:
+        args.server = config_parsed_server
+
+    # In server mode: also try reading server.conf to find the bind address
+    # (the server might bind to a specific IP, not localhost)
+    if args.server == DEFAULT_GS_SERVER:
+        for cfg_path in ["/etc/gpushare/server.conf"]:
+            if os.path.isfile(cfg_path):
+                try:
+                    bind_addr = None
+                    srv_port = "9847"
+                    with open(cfg_path) as f:
+                        for line in f:
+                            line = line.strip()
+                            if line.startswith("bind_address="):
+                                bind_addr = line[13:].strip()
+                            elif line.startswith("port="):
+                                srv_port = line[5:].strip()
+                    if bind_addr and bind_addr not in ("", "0.0.0.0"):
+                        args.server = f"{bind_addr}:{srv_port}"
+                except Exception:
+                    pass
 
     # Determine mode
     mode = "client" if args.client else (args.mode or "server")
+    # Auto-detect: if --config is given, default to client mode
+    if args.config and not args.client and args.mode is None:
+        mode = "client"
     _state["mode"] = mode
 
     # Parse server address

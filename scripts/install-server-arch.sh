@@ -270,7 +270,7 @@ Wants=gpushare-server.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 $INSTALL_SHARE/dashboard/app.py --port $DASHBOARD_PORT
+ExecStart=/usr/bin/python3 $INSTALL_SHARE/dashboard/app.py --port $DASHBOARD_PORT --config /etc/gpushare/server.conf
 Restart=on-failure
 RestartSec=5
 WorkingDirectory=$INSTALL_SHARE/dashboard
