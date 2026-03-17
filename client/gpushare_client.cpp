@@ -298,8 +298,150 @@ static void init_local_gpu() {
     }
     fprintf(stderr, "[gpushare]   Device %d+ (remote): via gpushare server\n", count);
 }
-#else  /* _WIN32 */
-static void init_local_gpu() { /* Not yet implemented on Windows */ }
+#else  /* _WIN32 — Windows local GPU passthrough */
+
+#define WINSYM_LOAD(handle, sym, field) do { \
+    g_local.field = (decltype(g_local.field))GetProcAddress(handle, #sym); \
+} while(0)
+
+static void init_local_gpu() {
+    if (g_local_initialized) return;
+    g_local_initialized = true;
+    if (g_gpu_mode == "remote") return;
+
+    /* On Windows, the real CUDA DLLs are in the NVIDIA driver directory
+     * (for nvcuda.dll / nvml.dll) or the CUDA toolkit bin (for cudart64_*.dll).
+     * The install script backs them up to C:\Program Files\gpushare\real\
+     * but we also search standard NVIDIA/CUDA paths. */
+    const char *search_paths[] = {
+        "C:\\Program Files\\gpushare\\real",
+        nullptr  /* sentinel */
+    };
+
+    /* Try to find and load the real CUDA driver (nvcuda.dll) */
+    /* First check the backup path */
+    std::string cuda_path;
+    for (int i = 0; search_paths[i]; i++) {
+        std::string p = std::string(search_paths[i]) + "\\nvcuda.dll";
+        HMODULE h = LoadLibraryExA(p.c_str(), NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (h) { g_local.h_cuda = (void*)h; cuda_path = p; break; }
+    }
+    /* Fallback: search system — NVIDIA driver installs nvcuda.dll in System32 */
+    if (!g_local.h_cuda) {
+        char sys32[MAX_PATH];
+        GetSystemDirectoryA(sys32, MAX_PATH);
+        std::string sys_path = std::string(sys32) + "\\nvcuda.dll";
+        HMODULE h = LoadLibraryExA(sys_path.c_str(), NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (h) { g_local.h_cuda = (void*)h; cuda_path = sys_path; }
+    }
+    if (!g_local.h_cuda) return;  /* no local NVIDIA driver */
+
+    /* Load cudart (try backup path first, then CUDA toolkit) */
+    for (int i = 0; search_paths[i]; i++) {
+        for (const char *name : {"cudart64_130.dll", "cudart64_12.dll", "cudart64_110.dll"}) {
+            std::string p = std::string(search_paths[i]) + "\\" + name;
+            HMODULE h = LoadLibraryExA(p.c_str(), NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+            if (h) { g_local.h_cudart = (void*)h; break; }
+        }
+        if (g_local.h_cudart) break;
+    }
+    /* Fallback: search CUDA toolkit path */
+    if (!g_local.h_cudart) {
+        const char *cuda_env = getenv("CUDA_PATH");
+        if (cuda_env) {
+            for (const char *name : {"cudart64_130.dll", "cudart64_12.dll"}) {
+                std::string p = std::string(cuda_env) + "\\bin\\" + name;
+                HMODULE h = LoadLibraryExA(p.c_str(), NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+                if (h) { g_local.h_cudart = (void*)h; break; }
+            }
+        }
+    }
+    if (!g_local.h_cudart) {
+        FreeLibrary((HMODULE)g_local.h_cuda);
+        g_local.h_cuda = nullptr;
+        return;
+    }
+
+    /* Load NVML (optional) */
+    for (int i = 0; search_paths[i]; i++) {
+        std::string p = std::string(search_paths[i]) + "\\nvml.dll";
+        HMODULE h = LoadLibraryExA(p.c_str(), NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (h) { g_local.h_nvml = (void*)h; break; }
+    }
+    if (!g_local.h_nvml) {
+        char sys32[MAX_PATH];
+        GetSystemDirectoryA(sys32, MAX_PATH);
+        std::string p = std::string(sys32) + "\\nvml.dll";
+        HMODULE h = LoadLibraryExA(p.c_str(), NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (h) g_local.h_nvml = (void*)h;
+    }
+
+    /* Load runtime function pointers */
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaGetDeviceCount,       GetDeviceCount);
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaGetDeviceProperties,  GetDeviceProperties);
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaSetDevice,            SetDevice);
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaMalloc,               Malloc);
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaFree,                 Free);
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaMemcpy,               Memcpy);
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaMemcpyAsync,          MemcpyAsync);
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaMemset,               Memset);
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaDeviceSynchronize,    DeviceSynchronize);
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaStreamCreate,         StreamCreate);
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaStreamDestroy,        StreamDestroy);
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaStreamSynchronize,    StreamSynchronize);
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaEventCreate,          EventCreate);
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaEventDestroy,         EventDestroy);
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaEventRecord,          EventRecord);
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaEventSynchronize,     EventSynchronize);
+    WINSYM_LOAD((HMODULE)g_local.h_cudart, cudaEventElapsedTime,     EventElapsedTime);
+
+    /* Load NVML function pointers */
+    if (g_local.h_nvml) {
+        WINSYM_LOAD((HMODULE)g_local.h_nvml, nvmlInit_v2,                    NvmlInit);
+        WINSYM_LOAD((HMODULE)g_local.h_nvml, nvmlShutdown,                   NvmlShutdown);
+        WINSYM_LOAD((HMODULE)g_local.h_nvml, nvmlDeviceGetCount_v2,          NvmlDeviceGetCount);
+        WINSYM_LOAD((HMODULE)g_local.h_nvml, nvmlDeviceGetHandleByIndex_v2,  NvmlDeviceGetHandleByIndex);
+        WINSYM_LOAD((HMODULE)g_local.h_nvml, nvmlDeviceGetName,              NvmlDeviceGetName);
+        WINSYM_LOAD((HMODULE)g_local.h_nvml, nvmlDeviceGetMemoryInfo,        NvmlDeviceGetMemoryInfo);
+        WINSYM_LOAD((HMODULE)g_local.h_nvml, nvmlDeviceGetUtilizationRates,  NvmlDeviceGetUtilizationRates);
+        WINSYM_LOAD((HMODULE)g_local.h_nvml, nvmlDeviceGetTemperature,       NvmlDeviceGetTemperature);
+        WINSYM_LOAD((HMODULE)g_local.h_nvml, nvmlDeviceGetPowerUsage,        NvmlDeviceGetPowerUsage);
+        WINSYM_LOAD((HMODULE)g_local.h_nvml, nvmlDeviceGetFanSpeed,          NvmlDeviceGetFanSpeed);
+        WINSYM_LOAD((HMODULE)g_local.h_nvml, nvmlDeviceGetUUID,              NvmlDeviceGetUUID);
+        WINSYM_LOAD((HMODULE)g_local.h_nvml, nvmlDeviceGetPciInfo_v3,        NvmlDeviceGetPciInfo);
+        WINSYM_LOAD((HMODULE)g_local.h_nvml, nvmlDeviceGetCudaComputeCapability, NvmlDeviceGetCudaComputeCapability);
+        WINSYM_LOAD((HMODULE)g_local.h_nvml, nvmlDeviceGetClockInfo,         NvmlDeviceGetClockInfo);
+    }
+
+    /* Query local GPU count */
+    if (!g_local.GetDeviceCount) return;
+    int count = 0;
+    cudaError_t err = g_local.GetDeviceCount(&count);
+    if (err != cudaSuccess || count <= 0) return;
+    if (count > 8) count = 8;
+
+    g_local.local_count = count;
+    g_local.available = true;
+    g_remote_base = count;
+
+    /* Initialize local NVML handles */
+    if (g_local.NvmlInit && g_local.NvmlDeviceGetHandleByIndex) {
+        g_local.NvmlInit();
+        for (int i = 0; i < count; i++)
+            g_local.NvmlDeviceGetHandleByIndex(i, &g_local.nvml_handles[i]);
+    }
+
+    fprintf(stderr, "[gpushare] Local GPU passthrough (Windows): %d local GPU(s) detected\n", count);
+    if (g_local.GetDeviceProperties) {
+        for (int i = 0; i < count; i++) {
+            struct cudaDeviceProp prop;
+            memset(&prop, 0, sizeof(prop));
+            g_local.GetDeviceProperties(&prop, i);
+            fprintf(stderr, "[gpushare]   Device %d (local): %s\n", i, prop.name);
+        }
+    }
+    fprintf(stderr, "[gpushare]   Device %d+ (remote): via gpushare server\n", count);
+}
 #endif
 
 /* ── Phase 5+7: Client-side tiered pinned buffer pool ────── */
@@ -2297,6 +2439,11 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
             g_client_pinned.destroy();
             g_client_pinned_initialized = false;
         }
+        /* Clean up local GPU library handles */
+        if (g_local.h_nvml)   { FreeLibrary((HMODULE)g_local.h_nvml);   g_local.h_nvml = nullptr; }
+        if (g_local.h_cudart) { FreeLibrary((HMODULE)g_local.h_cudart); g_local.h_cudart = nullptr; }
+        if (g_local.h_cuda)   { FreeLibrary((HMODULE)g_local.h_cuda);   g_local.h_cuda = nullptr; }
+        g_local.available = false;
     }
     return TRUE;
 }

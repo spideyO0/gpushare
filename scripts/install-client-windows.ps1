@@ -442,6 +442,34 @@ if ($Compiler -eq "mingw") {
     }
 }
 
+# Backup real CUDA DLLs for local GPU passthrough (dual-GPU support)
+$realBackupDir = Join-Path $InstallDir "real"
+New-Item -ItemType Directory -Force -Path $realBackupDir | Out-Null
+
+$backupDlls = @(
+    @{ Name = "nvcuda.dll";       Search = @("$env:SystemRoot\System32") },
+    @{ Name = "cudart64_130.dll"; Search = @("$env:CUDA_PATH\bin", "$env:SystemRoot\System32") },
+    @{ Name = "cudart64_12.dll";  Search = @("$env:CUDA_PATH\bin", "$env:SystemRoot\System32") },
+    @{ Name = "nvml.dll";         Search = @("$env:SystemRoot\System32", "$env:ProgramFiles\NVIDIA Corporation\NVSMI") }
+)
+
+foreach ($entry in $backupDlls) {
+    $dstPath = Join-Path $realBackupDir $entry.Name
+    if (Test-Path $dstPath) { continue }
+    foreach ($dir in $entry.Search) {
+        if (-not $dir) { continue }
+        $srcPath = Join-Path $dir $entry.Name
+        if (Test-Path $srcPath) {
+            $realSrc = (Get-Item $srcPath).FullName
+            if ($realSrc -notmatch "gpushare") {
+                Copy-Item -Force $realSrc $dstPath
+                Write-Ok "Backed up $($entry.Name) from $dir"
+                break
+            }
+        }
+    }
+}
+
 # Create transparent replacement copies for each API
 Write-Info "Creating transparent CUDA/NVML replacement DLLs..."
 
