@@ -14,7 +14,7 @@ Share your NVIDIA GPU with any machine on your network. Applications on client m
 
 One library (`libgpushare_client`) installs as every CUDA library on the client. Applications load it thinking it's the real NVIDIA stack, and all GPU operations are transparently forwarded to the server over TCP.
 
-- **2,565 exported API functions** across 12 CUDA libraries
+- **2,600+ exported API functions** across 12 CUDA libraries
 - **Zero code changes** — any CUDA application works as-is
 - **Cross-platform** — Linux, macOS, Windows clients
 - **No LD_PRELOAD** — system-wide interception via library symlinks
@@ -110,7 +110,17 @@ Minimal 16-byte header per message:
 [4B magic "GPUS"] [4B length] [4B request_id] [2B opcode] [2B flags]
 ```
 
-133 functions have full argument-aware RPC serialization (cuBLAS GEMM, cuDNN convolutions, etc.). The remaining 2,432 functions are exported as symbols for link compatibility.
+Flag bits: `0x0004` chunked, `0x0008` last chunk. Server advertises capabilities (`GS_CAP_ASYNC`, `GS_CAP_CHUNKED`) in init response.
+
+133 functions have full argument-aware RPC serialization (cuBLAS GEMM, cuDNN convolutions, etc.) with async and chunked transfer support. The remaining 2,432+ functions are exported as symbols for link compatibility.
+
+### Transfer optimizations
+
+- **Pinned memory staging** — server uses pre-allocated page-locked buffers for DMA transfers
+- **Async memcpy** — H2D transfers return immediately after queuing GPU DMA
+- **Chunked pipelining** — transfers > 4 MB split into chunks, overlapping network I/O with GPU DMA
+- **Request pipelining** — client uses dedicated recv thread, multiple threads can have concurrent in-flight RPCs
+- **Backward compatible** — old clients work with new server, new clients fall back gracefully with old server
 
 ## API coverage
 
@@ -128,7 +138,7 @@ Minimal 16-byte header per message:
 | cuRAND | 29 | — | Random number generation |
 | NVRTC | 25 | — | Runtime compilation |
 | nvJPEG | 81 | — | JPEG decode |
-| **Total** | **2,565** | **133** | |
+| **Total** | **2,600+** | **133** | |
 
 "Full RPC" = proper argument serialization, data forwarded to server, results returned.
 "—" = exported symbol for link compatibility, returns success. Add full RPC support by adding the function to `codegen/generate_stubs.py`.
@@ -268,7 +278,7 @@ gpushare/
 ## Limitations
 
 - **CUDA compute only** — graphics APIs (DirectX, Vulkan, OpenGL) are not supported. Blender rendering, games, and Photoshop GPU acceleration require a local GPU or a streaming solution (Sunshine/Moonlight).
-- **1 Gbps bandwidth limit** — large data transfers (>100 MB) are bottlenecked by the network. For training, keep data on the server side.
+- **1 Gbps bandwidth limit** — large data transfers (>100 MB) are bottlenecked by the network. Chunked pipelining helps saturate the link by overlapping network I/O with GPU DMA, but the physical limit remains. For training, keep data on the server side.
 - **PyTorch on macOS** — Apple's PyTorch builds are CPU-only (CUDA compiled out). Use the gpushare Python API directly for ML on Mac.
 - **Windows Task Manager** — cannot show remote GPUs (requires kernel-mode WDDM driver). Use nvidia-smi or the tray widget instead.
 

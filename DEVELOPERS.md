@@ -34,6 +34,9 @@ The server runs on the machine with the physical GPU (e.g., Arch Linux with an R
 - **LAN/WAN detection.** On startup, `detect_local_networks()` enumerates all local interfaces via `getifaddrs()`. When a client connects, `classify_client()` checks whether the client IP falls within any local subnet. This is used for logging and could be used for bandwidth throttling.
 - **nvidia-smi parsing.** The `GS_OP_GET_GPU_STATUS` handler parses nvidia-smi output to return live GPU metrics (temperature, utilization, memory, power, clocks) without linking against NVML directly.
 - **Stats tracking.** Global atomics (`g_total_ops`, `g_total_bytes_in`, `g_total_bytes_out`) and per-client atomics track all operations. The `GS_OP_GET_STATS` handler aggregates these into a response for the dashboard.
+- **Pinned buffer pool.** `PinnedBufferPool` pre-allocates 4 x 4 MB `cudaMallocHost` buffers at startup. Each buffer has an `is_pinned` flag tracking whether it is in use. Async transfer handlers (`handle_memcpy_h2d_async`, `handle_memcpy_d2h_async`) acquire a pinned buffer, initiate the transfer on a stream, and attach a `PendingTransfer` (cudaEvent + buffer index) so the buffer is released back to the pool once the event completes.
+- **Chunked transfers.** `handle_memcpy_h2d_chunked` and `handle_memcpy_d2h_chunked` break large transfers into protocol-sized chunks, enabling progress reporting and avoiding the 256 MB max message limit for very large allocations.
+- **Capability reporting.** The `handle_init` handler now returns a `capabilities` field in `gs_init_resp_t`, advertising `GS_CAP_ASYNC | GS_CAP_CHUNKED` so clients can discover and use optimized transfer paths.
 - **Configuration.** Reads from `/etc/gpushare/server.conf` or a path given via `--config`. Supports `device`, `port`, `max_clients`, `log_level`, and `bind` (bind address).
 
 **Server startup sequence:**
@@ -64,12 +67,16 @@ The client is a shared library (`libgpushare_client.so` / `.dylib` / `.dll`) tha
 3. `/etc/gpushare/client.conf` (Linux) or `C:\ProgramData\gpushare\client.conf` (Windows)
 4. Default: `localhost:9847`
 
-**Connection management:**
+**Connection management (pipelined):**
 
-- Single TCP connection per process, protected by `g_sock_mtx`
-- Connection is established lazily on first CUDA call (via `ensure_connected()`)
+- Single TCP connection per process with pipelined request/response handling
+- `g_send_mtx` protects the send path only (not the full socket)
+- A dedicated `recv_thread` reads all incoming responses and dispatches them by `req_id` via `std::promise`/`std::future` pairs stored in the `g_pending` map
 - Request IDs are monotonically increasing (`g_req_id` atomic)
-- All communication is synchronous: send request, wait for response
+- Multiple threads can have in-flight requests simultaneously; each blocks on its own future
+- Connection is established lazily on first CUDA call (via `ensure_connected()`)
+- `g_server_caps` is read from the `gs_init_resp_t` during the init handshake and used to select async/chunked transfer paths with automatic fallback to synchronous transfers if the server does not advertise the corresponding capability
+- On Windows, `DllMain` with `DLL_PROCESS_DETACH` calls `detach()` on the recv thread instead of `join()` to avoid a loader lock deadlock during process exit
 
 **Handle mapping:**
 
@@ -139,13 +146,13 @@ See [Section 5](#5-protocol-reference) for the full opcode and payload reference
 Zero-dependency Python HTTP server for web-based monitoring. Uses only the Python standard library (`http.server`, `json`, `subprocess`, `threading`, `struct`, `socket`).
 
 **Modes:**
-- **Server mode** (default, port 9848): Shows local GPU stats via nvidia-smi, plus connected client info by querying the gpushare server via binary protocol (`GS_OP_GET_STATS`).
-- **Client mode** (`--client`, port 9849): Shows connection status to a remote gpushare server.
+- **Server mode** (default, port 9848): Queries GPU status via `GS_OP_GET_GPU_STATUS` and client info via `GS_OP_GET_STATS` from the gpushare server. No local nvidia-smi dependency.
+- **Client mode** (`--client`, port 9849): Fetches GPU status from the remote gpushare server (no local nvidia-smi needed). Fixed: `--config` with `server.conf` no longer forces client mode.
 
 **Implementation:**
-- `Poller` thread connects to the gpushare server every 2 seconds, sends `GS_OP_GET_STATS`, and updates shared state.
+- `Poller` thread connects to the gpushare server every 2 seconds, sends `GS_OP_GET_STATS` and `GS_OP_GET_GPU_STATUS`, and updates shared state.
 - `DashboardHandler` serves a single HTML page with all CSS and JS embedded inline.
-- API endpoint `/api/stats` returns JSON for AJAX polling.
+- API endpoint `/api/stats` returns JSON for AJAX polling. Stats now include: server uptime, active clients, total connections, and allocated VRAM.
 - No WebSocket or SSE -- uses simple polling from the frontend.
 
 ### 1.6 TUI (`tui/monitor.py`)
@@ -361,6 +368,14 @@ cmake .. -DCUDAToolkit_ROOT=/opt/cuda
 **Root cause:** `gs_device_props_t` was parsed with the wrong struct format string. The byte count did not match the actual struct layout.
 
 **Fix:** Count actual bytes: 256 (name) + 16 (2 x uint64) + 56 (14 x int32) + 24 (3 x uint64) = 352 bytes. Use format string `"<QQ" + "i"*14 + "QQQ"` offset by 256.
+
+### Bug 19: DllMain thread join deadlock on Windows
+
+**Symptom:** Client process hangs on exit (never terminates) on Windows.
+
+**Root cause:** `DllMain` with `DLL_PROCESS_DETACH` runs under the Windows loader lock. Calling `std::thread::join()` on the recv thread from `DllMain` deadlocks because the recv thread itself needs the loader lock to terminate.
+
+**Fix:** Call `detach()` instead of `join()` on the recv thread during `DLL_PROCESS_DETACH`. The process is exiting anyway, so the detached thread will be cleaned up by the OS. Only use `join()` for explicit `close()` calls outside of `DllMain`.
 
 ### Bug 18: bind=0.0.0.0 treated as specific address
 
@@ -647,6 +662,8 @@ Every message (request and response) starts with a 16-byte header:
 **Flags:**
 - `0x0001` (`GS_FLAG_RESPONSE`): Set on responses
 - `0x0002` (`GS_FLAG_ERROR`): Set on error responses
+- `0x0004` (`GS_FLAG_CHUNKED`): Message is part of a chunked transfer
+- `0x0008` (`GS_FLAG_LAST_CHUNK`): Final chunk in a chunked transfer sequence
 
 ### Opcodes
 
@@ -664,6 +681,8 @@ Every message (request and response) starts with a 16-byte header:
 | `0x0023` | `GS_OP_MEMCPY_D2H` | Memory |
 | `0x0024` | `GS_OP_MEMCPY_D2D` | Memory |
 | `0x0025` | `GS_OP_MEMSET` | Memory |
+| `0x0026` | `GS_OP_MEMCPY_H2D_ASYNC` | Memory (async) |
+| `0x0027` | `GS_OP_MEMCPY_D2H_ASYNC` | Memory (async) |
 | `0x0030` | `GS_OP_MODULE_LOAD` | Kernel |
 | `0x0031` | `GS_OP_MODULE_UNLOAD` | Kernel |
 | `0x0032` | `GS_OP_GET_FUNCTION` | Kernel |
@@ -700,13 +719,15 @@ Every message (request and response) starts with a 16-byte header:
 +--------+--------+
 ```
 
-**Response payload (12 bytes):**
+**Response payload (16 bytes):**
 
 ```
-+--------+--------+--------+
-|  version (u32)  | session_id(u32) | max_transfer(u32) |
-+--------+--------+--------+
++--------+--------+--------+--------+
+|  version (u32)  | session_id(u32) | max_transfer(u32) | capabilities(u32) |
++--------+--------+--------+--------+
 ```
+
+The `capabilities` field is a bitmask: `GS_CAP_ASYNC` (0x01) indicates support for async pinned transfers, `GS_CAP_CHUNKED` (0x02) indicates support for chunked transfers.
 
 #### GS_OP_MALLOC
 

@@ -6,7 +6,7 @@ Both projects share the same goal: make a remote NVIDIA GPU accessible over the 
 
 |  | SCUDA | gpushare |
 |---|---|---|
-| Total API functions | ~200 | **2,565** |
+| Total API functions | ~200 | **2,600+** |
 | Libraries covered | 3 | **12** |
 | Platforms | Linux only | **Linux + macOS + Windows** |
 | Requires LD_PRELOAD | Yes | **No** |
@@ -35,7 +35,7 @@ Both projects share the same goal: make a remote NVIDIA GPU accessible over the 
 | cuRAND | 0 | **29** | N/A |
 | NVRTC | 0 | **25** | N/A |
 | nvJPEG | 0 | **81** | N/A |
-| **TOTAL** | **~200** | **2,565** | **12.8x** |
+| **TOTAL** | **~200** | **2,600+** | **13x** |
 
 ### What this means in practice
 
@@ -124,6 +124,7 @@ Same. DLLs in system PATH. Plus a system tray GPU monitor.
 | LAN-only bind option | No | Yes (bind= in config) |
 | Keep-alive | No | Yes (dead client detection) |
 | 1 Gbps saturation | Unknown | Tested: ~110 MB/s sustained |
+| Transfer pipelining | No | Chunked 4 MB pipeline saturates link |
 
 ### How LAN detection works
 
@@ -192,6 +193,7 @@ Application ──system linker──► libgpushare_client.so ──TCP──�
 - Config file + env var + runtime GUI change
 - One library serves as 12 different CUDA libraries
 - Binary protocol with 16-byte header
+- Transfer optimizations: chunked 4 MB pipelining, server-side pinned memory staging, async memcpy, capability negotiation
 
 ---
 
@@ -226,7 +228,7 @@ This 10% gap is closable — adding a function to gpushare's codegen is one line
 
 ---
 
-## 9. Feature matrix (44 features)
+## 9. Feature matrix (49 features)
 
 | # | Feature | SCUDA | gpushare |
 |---|---|---|---|
@@ -243,7 +245,7 @@ This 10% gap is closable — adding a function to gpushare's codegen is one line
 | 11 | NVRTC | No | Yes |
 | 12 | nvJPEG | No | Yes |
 | 13 | Auto-codegen | Yes | Yes |
-| 14 | Total functions | ~200 | 2,565 |
+| 14 | Total functions | ~200 | 2,600+ |
 | 15 | Linux client (native) | LD_PRELOAD | System-wide |
 | 16 | macOS client | Docker only | Native |
 | 17 | Windows client | No | Yes |
@@ -274,8 +276,13 @@ This 10% gap is closable — adding a function to gpushare's codegen is one line
 | 42 | CUDA 13.x | Broken | Works |
 | 43 | RTX 5070 Blackwell | Broken | Works |
 | 44 | PTX kernel exec | Unknown | Works |
+| 45 | Transfer pipelining (chunked 4 MB) | No | Yes |
+| 46 | Pinned memory staging (server) | No | Yes |
+| 47 | Async memcpy support | No | Yes |
+| 48 | Request pipelining (concurrent RPCs) | No | Yes |
+| 49 | Capability negotiation (backward-compat) | No | Yes |
 
-**SCUDA: 5/44 features. gpushare: 44/44 features.**
+**SCUDA: 5/49 features. gpushare: 49/49 features.**
 
 ---
 
@@ -289,4 +296,5 @@ This 10% gap is closable — adding a function to gpushare's codegen is one line
 | CUDA 13.x or RTX 5070 | **gpushare** (SCUDA segfaults) |
 | Need cuFFT/cuSPARSE/cuSOLVER | **gpushare** (SCUDA doesn't have these) |
 | Multiple clients sharing one GPU | **gpushare** (per-client stats, connection limits) |
+| High-bandwidth GPU transfers | **gpushare** (chunked pipelining + pinned buffers saturate the link) |
 | Blender/Photoshop/games | Neither (need graphics APIs, use Sunshine/Moonlight) |

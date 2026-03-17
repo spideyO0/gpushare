@@ -18,6 +18,9 @@ gpushare shares an NVIDIA GPU over a TCP network. One server machine (Arch Linux
 - Live GPU status via nvidia-smi subprocess parsing
 - Config file at /etc/gpushare/server.conf
 - CRITICAL: each client thread calls `cudaSetDevice(g_device)` to ensure CUDA context is current (Bug #1)
+- **PinnedBufferPool** in ClientSession: 4x4MB pinned buffers allocated via `cudaMallocHost`, with `is_pinned[]` tracking and automatic `malloc` fallback. Used for D2H transfers to enable async DMA.
+- **PendingTransfer** tracking for async H2D/D2H operations
+- Async memcpy handlers (`GS_OP_MEMCPY_H2D_ASYNC`, `GS_OP_MEMCPY_D2H_ASYNC`) with chunked transfer support (4MB chunks) for streaming large transfers without blocking
 
 **Client library** (`client/gpushare_client.cpp`, ~900 lines):
 - Single shared library (.so/.dylib/.dll) that exports three API layers:
@@ -27,7 +30,9 @@ gpushare shares an NVIDIA GPU over a TCP network. One server machine (Arch Linux
 - Installed as symlinks for ALL CUDA libraries (libcudart.so, libcuda.so.1, libnvidia-ml.so.1, libcublas.so, libcudnn.so, libcufft.so, libcusparse.so, libcusolver.so, libcurand.so, libnvrtc.so, libnvjpeg.so)
 - Auto-reads server address from config files (~/.config/gpushare/client.conf, /etc/gpushare/client.conf) — no env vars needed
 - MSVC-compatible: uses PACKED_STRUCT_BEGIN/END macros, SSIZE_T typedef, DllMain for cleanup, __declspec(dllexport)
-- Thread-safe: single socket protected by mutex, atomic request IDs
+- **Pipelined RPC architecture**: replaced single `g_sock_mtx` with `g_send_mtx` (send-only lock) and a dedicated `recv_thread` that dispatches responses by `req_id` via `promise`/`future` through a `g_pending` map. Multiple threads can have concurrent in-flight RPCs.
+- Stores `g_server_caps` from INIT handshake. Uses async opcodes when `GS_CAP_ASYNC` is set, chunked transfers when `GS_CAP_CHUNKED` is set, falls back to sync single-message path for old servers.
+- Windows `DllMain` uses `detach()` instead of `join()` on the recv thread during process exit to avoid loader lock deadlock
 
 **Generated stubs — two tiers:**
 1. `client/generated_stubs.cpp` + `server/generated_dispatch.cpp` (from `codegen/generate_stubs.py`):
@@ -43,7 +48,7 @@ gpushare shares an NVIDIA GPU over a TCP network. One server machine (Arch Linux
    - Weak symbols get overridden by tier-1 full-RPC functions
    - Server has a dlsym-based resolver for all libraries
 
-**Total: 2,565 exported functions across 12 CUDA libraries.**
+**Total: 2,600+ exported functions across 12 CUDA libraries.**
 
 ### Protocol (`include/gpushare/protocol.h`)
 
@@ -56,17 +61,28 @@ Key opcodes:
 - 0x0001 INIT, 0x0002 CLOSE, 0x0003 PING
 - 0x0010-0x0012 Device management
 - 0x0020-0x0025 Memory (malloc, free, memcpy H2D/D2H/D2D, memset)
+- 0x0026 MEMCPY_H2D_ASYNC, 0x0027 MEMCPY_D2H_ASYNC (pipelined async transfers)
 - 0x0030-0x0033 Module/kernel (load PTX, get function, launch)
 - 0x0040-0x0048 Streams and events
 - 0x0050-0x0052 Fat binary registration
 - 0x0060 Stats, 0x0070 Live GPU status
 - 0x0080 Generic library call (cuBLAS/cuDNN/etc)
 
+Flags:
+- 0x0004 GS_FLAG_CHUNKED — message is part of a chunked transfer
+- 0x0008 GS_FLAG_LAST_CHUNK — final chunk in a chunked transfer
+
+Capability bits (in `gs_init_resp_t.capabilities`):
+- 0x01 GS_CAP_ASYNC — server supports async memcpy opcodes
+- 0x02 GS_CAP_CHUNKED — server supports chunked transfers (4MB chunks via GS_CHUNK_SIZE)
+
+New structs: `gs_memcpy_h2d_async_req_t`, `gs_memcpy_d2h_async_req_t`, `gs_memcpy_h2d_chunk_t`, `gs_memcpy_d2h_chunk_t`. The `gs_init_resp_t` gained a `uint32_t capabilities` field (backward-compatible -- old clients read only the first 12 bytes).
+
 All structs use `PACKED_STRUCT_BEGIN`/`PACKED_STRUCT_END` macros for MSVC portability.
 
 ### Monitoring
 
-- **Web dashboard** (`dashboard/app.py`): Zero-dependency Python HTTP server, connects to gpushare server via binary protocol, polls nvidia-smi, serves embedded HTML/CSS/JS. Has POST /api/server (change IP) and POST /api/service (start/stop).
+- **Web dashboard** (`dashboard/app.py`): Zero-dependency Python HTTP server, connects to gpushare server via binary protocol, polls nvidia-smi, serves embedded HTML/CSS/JS. Has POST /api/server (change IP) and POST /api/service (start/stop). Client mode queries GS_OP_GET_GPU_STATUS. Displays server stats (uptime, active clients, total connections, alloc_mb). `--config` with server.conf no longer forces client mode.
 - **TUI** (`tui/monitor.py`): Curses-based, stdlib only. Keys: e=edit IP, s=start, x=stop, a=auto-stop, r=reconnect, q=quit.
 - **Windows tray** (`client/gpu_tray_windows.pyw`): pystray + pillow. Live temp/util icon, right-click menu with server change dialog (tkinter), service control, nvidia-smi.
 - **nvidia-smi shim** (`scripts/nvidia-smi`): Python script that queries NVML via ctypes, outputs matching nvidia-smi format including CSV query mode.
@@ -94,6 +110,8 @@ All scripts support: `--force` (full reinstall), upgrade detection (IS_UPGRADE),
 8. **rpc_simple returns int32_t**, not cudaError_t. All callers in gpushare_client.cpp must cast: `(cudaError_t)rpc_simple(...)`.
 9. **goto over initialization**: C++ forbids goto jumping over variable declarations. Generated dispatch uses `do{...}while(0)` + `break` pattern instead.
 10. **Struct packing Python**: gs_device_props_t is 352 bytes packed. Python format: `"<QQ" + "i"*14 + "QQQ"` at offset 256 after the name field.
+11. **DllMain loader lock deadlock**: On Windows, calling `join()` on the recv thread inside `DllMain(DLL_PROCESS_DETACH)` deadlocks because the loader lock prevents the thread from exiting. Use `detach()` instead and let the OS clean up.
+12. **Client pthread linking**: The pipelined recv thread requires `-lpthread` on Linux/macOS. CMakeLists.txt must link pthread for the client on non-Windows platforms.
 
 ## How to test
 
@@ -110,7 +128,7 @@ PYTHONPATH=python python examples/stress_test.py localhost --duration 10  # Stre
 kill %1
 
 # Check symbols
-nm -D build/libgpushare_client.so.1.0.0 | grep " T " | wc -l  # should be ~2565
+nm -D build/libgpushare_client.so.1.0.0 | grep " T " | wc -l  # should be ~2600+
 
 # Validate scripts
 for f in scripts/install-*.sh scripts/uninstall.sh; do bash -n "$f" && echo "$f: OK"; done
@@ -164,5 +182,6 @@ CMakeLists.txt              — Build: server (needs CUDA) + client (no CUDA)
 
 - Server: Arch Linux, RTX 5070, CUDA 13.1, systemd service running
 - Tested clients: macOS (M-series MacBook), Windows 11 (VS 2026)
-- API exports: 2,565 functions (112 hand-written + 133 generated RPC + 2,432 weak stubs)
+- API exports: 2,600+ functions (112 hand-written + 133 generated RPC + 2,432 weak stubs)
 - Verified working: GPU detection (NVML + CUDA), memory ops, PTX kernel execution, data transfer round-trip, stress test at ~2 GB/s local / ~44 MB/s over 1GbE LAN
+- Performance: pipelined RPC with async/chunked memcpy, pinned buffer pool on server for DMA transfers

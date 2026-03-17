@@ -36,6 +36,7 @@ GS_MAGIC = 0x47505553  # 'GPUS'
 GS_OP_INIT = 0x0001
 GS_OP_CLOSE = 0x0002
 GS_OP_GET_STATS = 0x0060
+GS_OP_GET_GPU_STATUS = 0x0070
 # Wire header: magic(4) + length(4) + req_id(4) + opcode(2) + flags(2) = 16 bytes
 GS_HEADER_FMT = "<IIIHH"
 GS_HEADER_SIZE = 16
@@ -128,26 +129,53 @@ def _gs_recv_msg(sock):
     payload = _recv_exact(sock, payload_len) if payload_len > 0 else b""
     return opcode, flags, payload
 
-def _query_gs_server(host, port):
-    """Connect, init, query stats, close. Returns a dict or None."""
+def _query_gs_server(host, port, fetch_gpu=False):
+    """Connect, init, query stats (and optionally GPU status), close. Returns a dict or None."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(3)
         sock.connect((host, port))
         # Init handshake
         _gs_send_msg(sock, GS_OP_INIT, 1, struct.pack("<II", 1, 1))
-        _gs_recv_msg(sock)  # init response
+        _gs_recv_msg(sock)  # init response (may be 12 or 16 bytes — we ignore it)
         # Query stats
         _gs_send_msg(sock, GS_OP_GET_STATS, 2)
         opcode, flags, payload = _gs_recv_msg(sock)
+
+        # Optionally query GPU status (for client mode — no local nvidia-smi)
+        gpu_status = None
+        if fetch_gpu:
+            _gs_send_msg(sock, GS_OP_GET_GPU_STATUS, 3)
+            gpu_op, gpu_flags, gpu_payload = _gs_recv_msg(sock)
+            if gpu_payload and len(gpu_payload) >= 48:
+                # Parse gs_gpu_status_t:
+                # Q mem_total, Q mem_used, Q mem_free,
+                # I gpu_util, I mem_util, I temperature,
+                # I power_draw_mw, I power_limit_mw, I fan_speed,
+                # I clock_sm_mhz, I clock_mem_mhz
+                gpu_fmt = "<QQQ" + "I" * 8
+                vals = struct.unpack_from(gpu_fmt, gpu_payload, 0)
+                gpu_status = {
+                    "mem_total": vals[0],
+                    "mem_used": vals[1],
+                    "mem_free": vals[2],
+                    "gpu_util": vals[3],
+                    "mem_util": vals[4],
+                    "temperature": vals[5],
+                    "power_draw_mw": vals[6],
+                    "power_limit_mw": vals[7],
+                    "fan_speed": vals[8],
+                    "clock_sm_mhz": vals[9],
+                    "clock_mem_mhz": vals[10],
+                }
+
         # Close
-        _gs_send_msg(sock, GS_OP_CLOSE, 3)
+        _gs_send_msg(sock, GS_OP_CLOSE, 4)
         sock.close()
         if payload is None or len(payload) < 44:
             return None
         # Parse gs_stats_header_t (packed)
-        hdr_fmt = "<QQQQQIIi"  # uptime, total_ops, bytes_in, bytes_out, alloc, active, total_conn, num_clients
-        # Actually: Q uptime, Q total_ops, Q bytes_in, Q bytes_out, Q alloc, I active, I total_conn, I num_clients
+        # Q uptime, Q total_ops, Q bytes_in, Q bytes_out, Q alloc, I active, I total_conn, I num_clients
         hdr_size = struct.calcsize("<QQQQQIII")
         uptime, total_ops, bytes_in, bytes_out, alloc, active, total_conn, num_clients = \
             struct.unpack_from("<QQQQQIII", payload, 0)
@@ -166,13 +194,16 @@ def _query_gs_server(host, port):
                 "ops": ops, "bytes_in": bi, "bytes_out": bo,
                 "connected_secs": conn_s,
             })
-        return {
+        result = {
             "uptime": uptime, "total_ops": total_ops,
             "bytes_in": bytes_in, "bytes_out": bytes_out,
             "alloc_mb": alloc / (1024*1024),
             "active_clients": active, "total_connections": total_conn,
             "clients": clients,
         }
+        if gpu_status:
+            result["gpu_status"] = gpu_status
+        return result
     except Exception as e:
         return None
 
@@ -218,15 +249,19 @@ class Poller(threading.Thread):
     def _tick_server(self):
         gpu = _parse_nvidia_smi()
         _state["gpu"] = gpu
-        _state["connected"] = gpu is not None
 
-        # Try to get client info from the gpushare server
-        stats = _query_gs_server(self.gs_host, self.gs_port)
+        # Get client info and server stats from the gpushare server
+        stats = _query_gs_server(self.gs_host, self.gs_port, fetch_gpu=False)
         if stats and isinstance(stats, dict):
+            _state["connected"] = True
             _state["clients"] = stats.get("clients", [])
             _state["ops_total"] = stats.get("total_ops", _state["ops_total"])
             _state["transfer_bytes_in"] = stats.get("bytes_in", 0)
             _state["transfer_bytes_out"] = stats.get("bytes_out", 0)
+            _state["active_clients"] = stats.get("active_clients", 0)
+            _state["total_connections"] = stats.get("total_connections", 0)
+            _state["server_uptime"] = stats.get("uptime", 0)
+            _state["alloc_mb"] = stats.get("alloc_mb", 0)
             # Bandwidth: delta from last sample
             prev_in = getattr(self, "_prev_bytes_in", 0)
             prev_out = getattr(self, "_prev_bytes_out", 0)
@@ -236,6 +271,7 @@ class Poller(threading.Thread):
             self._prev_bytes_in = cur_in
             self._prev_bytes_out = cur_out
         else:
+            _state["connected"] = gpu is not None  # at least GPU is visible
             _state["clients"] = _state.get("clients", [])
             bw = 0
 
@@ -248,18 +284,42 @@ class Poller(threading.Thread):
         if len(_state["memory_history"]) > MAX_HISTORY:
             _state["memory_history"] = _state["memory_history"][-MAX_HISTORY:]
 
-        _state["error"] = None if gpu else "nvidia-smi not available"
+        if not gpu and not stats:
+            _state["error"] = "nvidia-smi not available and gpushare server not reachable"
+        elif not stats:
+            _state["error"] = f"Cannot reach gpushare server at {self.gs_host}:{self.gs_port}"
+        else:
+            _state["error"] = None
 
     # -- client mode --------------------------------------------------------
 
     def _tick_client(self):
-        stats = _query_gs_server(self.gs_host, self.gs_port)
+        # Client mode: fetch GPU status from the server (no local nvidia-smi)
+        stats = _query_gs_server(self.gs_host, self.gs_port, fetch_gpu=True)
         if stats and isinstance(stats, dict):
             _state["connected"] = True
             _state["transfer_bytes_in"] = stats.get("bytes_in", _state["transfer_bytes_in"])
             _state["transfer_bytes_out"] = stats.get("bytes_out", _state["transfer_bytes_out"])
             _state["ops_total"] = stats.get("total_ops", _state["ops_total"])
             _state["clients"] = stats.get("clients", [])
+            _state["active_clients"] = stats.get("active_clients", 0)
+            _state["total_connections"] = stats.get("total_connections", 0)
+            _state["server_uptime"] = stats.get("uptime", 0)
+            _state["alloc_mb"] = stats.get("alloc_mb", 0)
+            # Convert GPU status from protocol format to nvidia-smi-like format
+            gs = stats.get("gpu_status")
+            if gs:
+                _state["gpu"] = {
+                    "name": "Remote GPU (via gpushare)",
+                    "memory_total": gs["mem_total"] / (1024*1024),
+                    "memory_used": gs["mem_used"] / (1024*1024),
+                    "memory_free": gs["mem_free"] / (1024*1024),
+                    "utilization_gpu": float(gs["gpu_util"]),
+                    "utilization_memory": float(gs["mem_util"]),
+                    "temperature": float(gs["temperature"]),
+                    "power_draw": gs["power_draw_mw"] / 1000.0,
+                    "power_limit": gs["power_limit_mw"] / 1000.0,
+                }
             # Bandwidth: delta from last sample
             prev_in = getattr(self, "_prev_bytes_in", 0)
             prev_out = getattr(self, "_prev_bytes_out", 0)
@@ -415,6 +475,9 @@ a{color:var(--accent);text-decoration:none}
     <div style="margin-top:16px">
       <div class="stat-row"><span class="stat-label">Bytes In</span><span class="stat-value" id="bytesIn">0 B</span></div>
       <div class="stat-row"><span class="stat-label">Bytes Out</span><span class="stat-value" id="bytesOut">0 B</span></div>
+      <div class="stat-row"><span class="stat-label">Allocated VRAM</span><span class="stat-value" id="allocMb">0 MiB</span></div>
+      <div class="stat-row"><span class="stat-label">Active Clients</span><span class="stat-value" id="activeClients">0</span></div>
+      <div class="stat-row"><span class="stat-label">Total Connections</span><span class="stat-value" id="totalConns">0</span></div>
     </div>
   </div>
 </div>
@@ -609,9 +672,9 @@ function update(d){
   if(d.error){errBanner.textContent=d.error;errBanner.classList.add("show");}
   else{errBanner.classList.remove("show");}
 
-  // uptime
-  const up=Date.now()/1000-d.start_time;
-  uptimeLabel.textContent="Uptime: "+fmtUptime(up);
+  // uptime — prefer server-reported uptime if available
+  const up=d.server_uptime>0?d.server_uptime:(Date.now()/1000-d.start_time);
+  uptimeLabel.textContent="Server Uptime: "+fmtUptime(up);
 
   // GPU
   const g=d.gpu;
@@ -639,6 +702,9 @@ function update(d){
   opsTotal.textContent=d.ops_total.toLocaleString();
   bytesIn.textContent=fmtBytes(d.transfer_bytes_in||0);
   bytesOut.textContent=fmtBytes(d.transfer_bytes_out||0);
+  $("allocMb").textContent=(d.alloc_mb||0).toFixed(0)+" MiB";
+  $("activeClients").textContent=(d.active_clients||0).toString();
+  $("totalConns").textContent=(d.total_connections||0).toString();
 
   // clients (server mode)
   if(MODE==="server"){
@@ -1010,6 +1076,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "transfer_bytes_out": _state["transfer_bytes_out"],
                 "error": _state["error"],
                 "server_addr": _gs_server_addr,
+                "active_clients": _state.get("active_clients", 0),
+                "total_connections": _state.get("total_connections", 0),
+                "server_uptime": _state.get("server_uptime", 0),
+                "alloc_mb": _state.get("alloc_mb", 0),
             }
         self._json_response(data)
 
@@ -1138,8 +1208,12 @@ def main():
                     with open(cfg_path) as f:
                         for line in f:
                             line = line.strip()
+                            if line.startswith("#"):
+                                continue
                             if line.startswith("bind_address="):
                                 bind_addr = line[13:].strip()
+                            elif line.startswith("bind="):
+                                bind_addr = line[5:].strip()
                             elif line.startswith("port="):
                                 srv_port = line[5:].strip()
                     if bind_addr and bind_addr not in ("", "0.0.0.0"):
@@ -1149,9 +1223,12 @@ def main():
 
     # Determine mode
     mode = "client" if args.client else (args.mode or "server")
-    # Auto-detect: if --config is given, default to client mode
+    # Auto-detect: if --config points to a CLIENT config, default to client mode.
+    # Server configs (server.conf) should keep server mode.
     if args.config and not args.client and args.mode is None:
-        mode = "client"
+        config_basename = os.path.basename(args.config).lower()
+        if "server" not in config_basename:
+            mode = "client"
     _state["mode"] = mode
 
     # Parse server address
