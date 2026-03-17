@@ -10,7 +10,7 @@ print(f"CUDA Available   : {torch.cuda.is_available()}")
 print()
 
 if not torch.cuda.is_available():
-    print("❌ No CUDA GPUs detected on this machine.")
+    print("No CUDA GPUs detected on this machine.")
     print("   Possible reasons:")
     print("   - PyTorch CPU-only build installed")
     print("   - No NVIDIA GPU physically present")
@@ -21,12 +21,14 @@ if not torch.cuda.is_available():
     exit()
 
 # ── List All GPUs ─────────────────────────────────────────
+# With gpushare installed, this includes both local and remote GPUs
+# automatically via the startup hook. No extra imports needed.
 gpu_count = torch.cuda.device_count()
 print(f"Found {gpu_count} GPU(s):\n")
 
 for i in range(gpu_count):
     props = torch.cuda.get_device_properties(i)
-    marker = " ← current default" if i == torch.cuda.current_device() else ""
+    marker = " <-- current default" if i == torch.cuda.current_device() else ""
     print(f"  [{i}] {props.name}{marker}")
     print(f"       VRAM        : {props.total_memory / 1024**3:.2f} GB")
     print(f"       Compute Cap : {props.major}.{props.minor}")
@@ -41,9 +43,9 @@ while True:
         if 0 <= selected < gpu_count:
             break
         else:
-            print(f"❌ Invalid choice. Enter a number between 0 and {gpu_count - 1}.")
+            print(f"Invalid choice. Enter a number between 0 and {gpu_count - 1}.")
     except ValueError:
-        print("❌ Please enter a valid integer.")
+        print("Please enter a valid integer.")
 
 # ── Set Device ────────────────────────────────────────────
 device = torch.device(f"cuda:{selected}")
@@ -51,9 +53,8 @@ torch.cuda.set_device(device)
 
 props = torch.cuda.get_device_properties(selected)
 print()
-print(f"✅ Selected        : cuda:{selected} — {props.name}")
+print(f"Selected        : cuda:{selected} -- {props.name}")
 print(f"   VRAM Total     : {props.total_memory / 1024**3:.2f} GB")
-print(f"   VRAM Free      : {(props.total_memory - torch.cuda.memory_allocated(selected)) / 1024**3:.2f} GB")
 print()
 
 # ── Generate Image on Selected GPU ───────────────────────
@@ -65,4 +66,4 @@ save_image(noise_image, output_file)
 
 print(f"Tensor Device     : {noise_image.device}")
 print(f"Memory Used       : {torch.cuda.memory_allocated(selected) / 1024**2:.2f} MB")
-print(f"✅ Image saved    : {output_file}")
+print(f"Image saved       : {output_file}")

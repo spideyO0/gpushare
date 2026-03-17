@@ -697,7 +697,7 @@ else
     warn "Real nvidia-smi found — not overriding (shim at $SHARE_DIR/nvidia-smi)"
 fi
 
-# ── 8. Install Python client ─────────────────────────────────────────────────
+# ── 8. Install Python client + startup hook ───────────────────────────────────
 if [[ "$SKIP_PYTHON" == false ]]; then
     if command -v python3 >/dev/null 2>&1 && command -v pip3 >/dev/null 2>&1; then
         info "Installing Python client package..."
@@ -705,6 +705,17 @@ if [[ "$SKIP_PYTHON" == false ]]; then
             || pip3 install "$PROJECT_DIR/python/" 2>/dev/null \
             || warn "Python client install failed (non-fatal)"
         ok "Python client installed"
+
+        # Install PyTorch startup hook for transparent remote GPU detection
+        info "Installing PyTorch startup hook..."
+        SITE_DIR=$(python3 -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || echo "")
+        if [[ -n "$SITE_DIR" && -d "$SITE_DIR" ]]; then
+            cp "$PROJECT_DIR/python/gpushare_hook.py" "$SITE_DIR/gpushare_hook.py" 2>/dev/null || true
+            cp "$PROJECT_DIR/python/gpushare.pth" "$SITE_DIR/gpushare.pth" 2>/dev/null || true
+            ok "Startup hook installed (remote GPUs auto-detected by PyTorch)"
+        else
+            warn "Could not find Python site-packages directory"
+        fi
     else
         warn "python3/pip3 not found — skipping Python client"
     fi

@@ -133,20 +133,24 @@ if ($IsUpgrade) {
     }
 }
 
-# -- CUDA conflict warning ---------------------------------------------------
+# -- Detect local NVIDIA GPU --------------------------------------------------
+$HasLocalGpu = $false
 $cudaPath = $env:CUDA_PATH
-if ($cudaPath -and (Test-Path $cudaPath)) {
-    Write-Host ""
-    Write-Host "  !! WARNING: Local CUDA installation detected at $cudaPath" -ForegroundColor Yellow
-    Write-Host "  !! gpushare installs DLLs that take priority over local CUDA." -ForegroundColor Yellow
-    Write-Host ""
-    if (-not $IsUpgrade -and -not $Force) {
-        $answer = Read-Host "   Continue and override local CUDA? [y/N]"
-        if ($answer -ne "y" -and $answer -ne "Y") {
-            Write-Info "Aborting. Remove -Server flag or set CUDA_PATH to empty to skip this check."
-            exit 0
-        }
+try {
+    $nvsmiOut = & "$env:SystemRoot\System32\nvidia-smi.exe" --query-gpu=name --format=csv,noheader 2>$null
+    if ($LASTEXITCODE -eq 0 -and $nvsmiOut) {
+        $HasLocalGpu = $true
+        $localGpuName = ($nvsmiOut -split "`n")[0].Trim()
+        Write-Host ""
+        Write-Host "  Local NVIDIA GPU detected: $localGpuName" -ForegroundColor Green
+        Write-Host "  Both local and remote GPUs will be available via gpushare Python API." -ForegroundColor Cyan
+        Write-Host ""
     }
+} catch { }
+if (-not $HasLocalGpu -and $cudaPath -and (Test-Path $cudaPath)) {
+    Write-Host ""
+    Write-Host "  CUDA toolkit detected at $cudaPath (no GPU driver found)" -ForegroundColor Yellow
+    Write-Host ""
 }
 
 # ==============================================================================
@@ -501,60 +505,94 @@ foreach ($dll in $apiDlls) {
 # System32 DLLs (nvcuda.dll, nvml.dll) are locked by the NVIDIA driver and
 # cannot be overwritten. Instead, we copy gpushare DLLs into every Python
 # installation's directory - position #1 in search order beats System32.
-Write-Step "Installing DLLs into Python directories for search order priority..."
+Write-Step "Configuring DLL interception..."
 
-# IMPORTANT: Do NOT copy nvcuda.dll or nvml.dll to Python directories.
-# PyTorch's c10_cuda.dll loads nvcuda.dll and calls real NVIDIA driver
-# functions that gpushare does not export. Overriding nvcuda.dll breaks
-# PyTorch with "WinError 127: The specified procedure could not be found".
-#
-# Only override cudart DLLs - these are the CUDA Runtime API that
-# applications call directly. gpushare handles local+remote GPU routing.
-$criticalDlls = @("cudart64_12.dll", "cudart64_130.dll")
-
-# Find all Python installations
+# Find all Python installations (needed for both cleanup and install)
 $pythonDirs = @()
-# Current Python in PATH
 $pyCmd = Get-Command python -ErrorAction SilentlyContinue
 if ($pyCmd) { $pythonDirs += Split-Path $pyCmd.Source }
 $py3Cmd = Get-Command python3 -ErrorAction SilentlyContinue
 if ($py3Cmd) { $pythonDirs += Split-Path $py3Cmd.Source }
-# Common Python install locations
 $pythonDirs += Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
 $pythonDirs += Get-ChildItem "C:\Python*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
-# Deduplicate
 $pythonDirs = $pythonDirs | Sort-Object -Unique | Where-Object { Test-Path $_ }
 
-# First, clean up any nvcuda.dll/nvml.dll from previous installs that broke PyTorch
-$dangerousDlls = @("nvcuda.dll", "nvml.dll")
+# ALWAYS clean up dangerous DLLs from previous installs (nvcuda.dll, nvml.dll, cudart)
+$allOverrideDlls = @("nvcuda.dll", "nvml.dll", "cudart64_12.dll", "cudart64_130.dll")
 foreach ($pyDir in $pythonDirs) {
-    foreach ($dll in $dangerousDlls) {
+    foreach ($dll in $allOverrideDlls) {
         $dllPath = Join-Path $pyDir $dll
-        if (Test-Path $dllPath) {
+        if (-not (Test-Path $dllPath)) { continue }
+        $ourDll = Join-Path $InstallDir $dll
+        if (-not (Test-Path $ourDll)) { continue }
+        $dstSize = (Get-Item $dllPath).Length
+        $ourSize = (Get-Item $ourDll).Length
+        if ($dstSize -eq $ourSize) {
+            Remove-Item -Force $dllPath -ErrorAction SilentlyContinue
+            Write-Ok "Cleaned up gpushare $dll from $pyDir"
+        }
+    }
+    # Also clean torch\lib
+    $torchLib = Join-Path $pyDir "Lib\site-packages\torch\lib"
+    if (Test-Path $torchLib) {
+        foreach ($dll in $allOverrideDlls) {
+            $dllPath = Join-Path $torchLib $dll
+            if (-not (Test-Path $dllPath)) { continue }
             $ourDll = Join-Path $InstallDir $dll
-            if (Test-Path $ourDll) {
-                $dstSize = (Get-Item $dllPath).Length
-                $ourSize = (Get-Item $ourDll).Length
-                if ($dstSize -eq $ourSize) {
+            if (-not (Test-Path $ourDll)) { continue }
+            $dstSize = (Get-Item $dllPath).Length
+            $ourSize = (Get-Item $ourDll).Length
+            if ($dstSize -eq $ourSize) {
+                $backupPath = Join-Path $realBackupDir "torch_$dll"
+                if (Test-Path $backupPath) {
+                    Copy-Item -Force $backupPath $dllPath
+                    Write-Ok "Restored original $dll in torch\lib"
+                } else {
                     Remove-Item -Force $dllPath -ErrorAction SilentlyContinue
-                    Write-Ok "Removed incorrectly placed $dll from $pyDir"
+                    Write-Ok "Removed gpushare $dll from torch\lib"
                 }
             }
         }
     }
 }
 
-if ($pythonDirs.Count -eq 0) {
-    Write-Warn "No Python installations found - DLL override limited to PATH priority"
+if ($HasLocalGpu) {
+    # LOCAL GPU PRESENT: Do NOT override DLLs.
+    # Instead, install a Python startup hook that patches torch.cuda to
+    # include remote GPUs alongside local ones. Zero code changes needed.
+    Write-Info "Local GPU detected - installing Python startup hook for dual-GPU support"
+
+    # Install gpushare_hook.py + gpushare.pth into each Python's site-packages
+    $hookSrc = Join-Path $ProjectDir "python\gpushare_hook.py"
+    $pthSrc = Join-Path $ProjectDir "python\gpushare.pth"
+    if ((Test-Path $hookSrc) -and (Test-Path $pthSrc)) {
+        foreach ($pyDir in $pythonDirs) {
+            $siteDir = Join-Path $pyDir "Lib\site-packages"
+            if (-not (Test-Path $siteDir)) { continue }
+            try {
+                Copy-Item -Force $hookSrc (Join-Path $siteDir "gpushare_hook.py")
+                Copy-Item -Force $pthSrc (Join-Path $siteDir "gpushare.pth")
+                Write-Ok "Installed startup hook to $siteDir"
+            } catch {
+                Write-Warn "Could not install hook to $siteDir : $_"
+            }
+        }
+    } else {
+        Write-Warn "Hook files not found in $ProjectDir\python - skipping"
+    }
+    Write-Info "Remote GPU will appear as a native CUDA device in PyTorch"
 } else {
+    # NO LOCAL GPU: Safe to override DLLs for transparent CUDA interception.
+    # Applications load our nvcuda.dll/cudart64_*.dll and all GPU calls
+    # are forwarded to the remote server.
+    Write-Info "No local GPU - installing transparent CUDA DLL overrides..."
+    $overrideDlls = @("nvcuda.dll", "nvml.dll", "cudart64_12.dll", "cudart64_130.dll")
     foreach ($pyDir in $pythonDirs) {
         $count = 0
-        foreach ($dll in $criticalDlls) {
+        foreach ($dll in $overrideDlls) {
             $srcDll = Join-Path $InstallDir $dll
             $dstDll = Join-Path $pyDir $dll
             if (-not (Test-Path $srcDll)) { continue }
-
-            # Backup the real DLL if one exists in this Python dir
             if (Test-Path $dstDll) {
                 $backupPath = Join-Path $realBackupDir "python_$dll"
                 $realSize = (Get-Item $dstDll).Length
@@ -563,7 +601,6 @@ if ($pythonDirs.Count -eq 0) {
                     Copy-Item -Force $dstDll $backupPath
                 }
             }
-
             try {
                 Copy-Item -Force $srcDll $dstDll
                 $count++
@@ -575,37 +612,9 @@ if ($pythonDirs.Count -eq 0) {
             Write-Ok "Installed $count DLLs to $pyDir"
         }
     }
-    Write-Info "DLLs installed to $($pythonDirs.Count) Python directory(s) for search order priority"
 }
 
-# IMPORTANT: Do NOT override torch\lib\ DLLs. PyTorch's internal c10_cuda.dll
-# depends on real NVIDIA driver functions that gpushare does not export.
-# Overriding torch\lib\nvcuda.dll breaks PyTorch with WinError 127.
-#
-# If a previous install placed DLLs in torch\lib\, restore them now.
-foreach ($pyDir in $pythonDirs) {
-    $torchLib = Join-Path $pyDir "Lib\site-packages\torch\lib"
-    if (-not (Test-Path $torchLib)) { continue }
-    foreach ($dll in @("nvcuda.dll", "nvml.dll", "cudart64_12.dll", "cudart64_130.dll")) {
-        $dstDll = Join-Path $torchLib $dll
-        if (-not (Test-Path $dstDll)) { continue }
-        $dstSize = (Get-Item $dstDll).Length
-        $ourDll = Join-Path $InstallDir $dll
-        if (-not (Test-Path $ourDll)) { continue }
-        $ourSize = (Get-Item $ourDll).Length
-        if ($dstSize -eq $ourSize) {
-            # This is our DLL in torch\lib - remove it or restore backup
-            $backupPath = Join-Path $realBackupDir "torch_$dll"
-            if (Test-Path $backupPath) {
-                Copy-Item -Force $backupPath $dstDll
-                Write-Ok "Restored original $dll in torch\lib (was incorrectly overridden)"
-            } else {
-                Remove-Item -Force $dstDll -ErrorAction SilentlyContinue
-                Write-Ok "Removed gpushare $dll from torch\lib (was incorrectly placed)"
-            }
-        }
-    }
-}
+# (torch\lib cleanup already handled above in the cleanup loop)
 
 # ==============================================================================
 # STEP 5: Configure system PATH
@@ -731,11 +740,19 @@ if (-not $SkipPython) {
         if ($hasPip -and (Test-Path $pythonDir)) {
             Write-Info "Installing gpushare Python package..."
             try {
-                & $pythonExe -m pip install $pythonDir --quiet 2>$null
-                if ($LASTEXITCODE -eq 0) {
+                $pipArgs = @("-m", "pip", "install", $pythonDir, "--quiet", "--no-warn-script-location")
+                $pipResult = Start-Process -FilePath $pythonExe -ArgumentList $pipArgs -Wait -PassThru -NoNewWindow 2>$null
+                if ($pipResult.ExitCode -eq 0) {
                     Write-Ok "Python client package installed"
                 } else {
-                    Write-Warn "Python client install returned non-zero (non-fatal)"
+                    # Try without --quiet in case of pip version issues
+                    $pipArgs2 = @("-m", "pip", "install", $pythonDir)
+                    $pipResult2 = Start-Process -FilePath $pythonExe -ArgumentList $pipArgs2 -Wait -PassThru -NoNewWindow 2>$null
+                    if ($pipResult2.ExitCode -eq 0) {
+                        Write-Ok "Python client package installed"
+                    } else {
+                        Write-Warn "Python client install returned non-zero (non-fatal)"
+                    }
                 }
             } catch {
                 Write-Warn "Python client install failed (non-fatal): $_"
@@ -984,14 +1001,25 @@ foreach ($dll in $apiDlls) {
     Write-Host "    $dll" -ForegroundColor Gray
 }
 Write-Host ""
+if ($HasLocalGpu) {
+Write-Host "  Local GPU:       " -NoNewline; Write-Host "$localGpuName" -ForegroundColor Green
+Write-Host "  Remote GPU:      " -NoNewline; Write-Host "via gpushare (auto-detected by PyTorch)" -ForegroundColor Cyan
+Write-Host "  Integration:     " -NoNewline; Write-Host "Python startup hook" -ForegroundColor Green -NoNewline; Write-Host " (patches torch.cuda at import time)"
+} else {
 Write-Host "  CUDA override:   " -NoNewline; Write-Host "ACTIVE" -ForegroundColor Green
 Write-Host "                   All GPU apps will use the remote GPU transparently."
+}
 Write-Host "  API coverage:    2620+ functions (cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSOLVER, cuRAND, NVRTC)"
 Write-Host "  Transfer opts:   " -NoNewline; Write-Host "ACTIVE" -ForegroundColor Green -NoNewline; Write-Host " (tiered pinned pools, async memcpy, chunked pipelining, D2H prefetch, RDMA, LZ4/zstd, multi-server GPU pooling)"
 Write-Host "  Task Manager:    " -NoNewline; Write-Host "GPU tab will show remote GPU (after reboot)" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Usage:" -ForegroundColor White
-Write-Host "    python my_training.py        " -NoNewline -ForegroundColor Cyan; Write-Host "# uses remote GPU"
+if ($HasLocalGpu) {
+Write-Host "    python my_training.py        " -NoNewline -ForegroundColor Cyan; Write-Host "# local + remote GPU auto-detected"
+Write-Host "    torch.cuda.device_count()    " -NoNewline -ForegroundColor Cyan; Write-Host "# returns local + remote count"
+} else {
+Write-Host "    python my_training.py        " -NoNewline -ForegroundColor Cyan; Write-Host "# uses remote GPU transparently"
+}
 Write-Host "    nvidia-smi                   " -NoNewline -ForegroundColor Cyan; Write-Host "# show remote GPU stats"
 Write-Host "    gpushare-monitor             " -NoNewline -ForegroundColor Cyan; Write-Host "# TUI status monitor"
 Write-Host ""

@@ -1,0 +1,1 @@
+import gpushare_hook; gpushare_hook.install()
