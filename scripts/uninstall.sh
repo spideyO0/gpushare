@@ -98,9 +98,47 @@ if [[ "$OS" == "linux" ]]; then
     # Client library + all symlinks (CUDA runtime, driver API, NVML)
     remove_dir /usr/local/lib/gpushare
 
+    # Symlinks in system library directory (created by install-client-linux.sh)
+    SYS_LIB_DIR="/usr/lib"
+    if [[ -d /usr/lib64 ]] && [[ ! -L /usr/lib64 ]]; then
+        SYS_LIB_DIR="/usr/lib64"
+    fi
+    for link in libcudart.so libcudart.so.11 libcudart.so.11.0 \
+                libcudart.so.12 libcudart.so.12.0 libcudart.so.13 libcudart.so.13.0 \
+                libcuda.so libcuda.so.1 \
+                libnvidia-ml.so libnvidia-ml.so.1 \
+                libcublas.so libcublas.so.11 libcublas.so.12 libcublas.so.13 \
+                libcublasLt.so libcublasLt.so.11 libcublasLt.so.12 libcublasLt.so.13 \
+                libcudnn.so libcudnn.so.8 libcudnn.so.9 \
+                libcufft.so libcufft.so.11 \
+                libcusparse.so libcusparse.so.12 \
+                libcusolver.so libcusolver.so.11 \
+                libcurand.so libcurand.so.10 \
+                libnvrtc.so libnvrtc.so.12 \
+                libnvjpeg.so libnvjpeg.so.12; do
+        local target="$SYS_LIB_DIR/$link"
+        # Only remove if it's a symlink pointing to gpushare
+        if [[ -L "$target" ]]; then
+            local real_target
+            real_target=$(readlink -f "$target" 2>/dev/null || true)
+            if [[ "$real_target" == *gpushare* ]]; then
+                FILES_TO_REMOVE+=("$target")
+            fi
+        fi
+    done
+
     # Commands
     remove_file /usr/local/bin/gpushare-monitor
     remove_file /usr/local/bin/gpushare-patch
+
+    # nvidia-smi shim
+    if [[ -L /usr/local/bin/nvidia-smi ]] || [[ -f /usr/local/bin/nvidia-smi ]]; then
+        local nvsmi_target
+        nvsmi_target=$(readlink -f /usr/local/bin/nvidia-smi 2>/dev/null || true)
+        if [[ "$nvsmi_target" == *gpushare* ]]; then
+            remove_file /usr/local/bin/nvidia-smi
+        fi
+    fi
 
     # Shared files
     remove_dir /usr/local/share/gpushare
@@ -124,10 +162,24 @@ if [[ "$OS" == "linux" ]]; then
     remove_file /etc/systemd/user/gpushare-dashboard.service
     COMMANDS_TO_RUN+=("systemctl daemon-reload")
 
-    # Python client
+    # Python client + startup hook
     if command -v pip3 >/dev/null 2>&1; then
         if pip3 show gpushare >/dev/null 2>&1; then
             COMMANDS_TO_RUN+=("pip3 uninstall -y gpushare")
+        fi
+    fi
+    # Remove Python startup hook from all site-packages
+    if command -v python3 >/dev/null 2>&1; then
+        for site_dir in $(python3 -c "import site; print(' '.join(site.getsitepackages()))" 2>/dev/null); do
+            remove_file "$site_dir/gpushare_hook.py"
+            remove_file "$site_dir/gpushare.pth"
+        done
+        # Also user site-packages
+        local user_site
+        user_site=$(python3 -c "import site; print(site.getusersitepackages())" 2>/dev/null || true)
+        if [[ -n "$user_site" ]]; then
+            remove_file "$user_site/gpushare_hook.py"
+            remove_file "$user_site/gpushare.pth"
         fi
     fi
 
@@ -175,11 +227,17 @@ if [[ "$OS" == "macos" ]]; then
         FILES_TO_REMOVE+=("$PLIST")
     fi
 
-    # Python client
+    # Python client + startup hook
     if command -v pip3 >/dev/null 2>&1; then
         if pip3 show gpushare >/dev/null 2>&1; then
             COMMANDS_TO_RUN+=("pip3 uninstall -y gpushare")
         fi
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        for site_dir in $(python3 -c "import site; print(' '.join(site.getsitepackages()))" 2>/dev/null); do
+            remove_file "$site_dir/gpushare_hook.py"
+            remove_file "$site_dir/gpushare.pth"
+        done
     fi
 
     # Config (only with --purge)

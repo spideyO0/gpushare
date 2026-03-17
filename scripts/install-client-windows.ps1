@@ -21,6 +21,19 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Handle POSIX-style --flags that users may type instead of -Flags
+if ($Server -match "^--") {
+    # $Server captured a flag like "--force" because PowerShell didn't parse it
+    switch -Regex ($Server) {
+        "^--force$"       { $Force = $true }
+        "^--skip-build$"  { $SkipBuild = $true }
+        "^--skip-python$" { $SkipPython = $true }
+        "^--auto-deps$"   { $AutoDeps = $true }
+        "^--help$"        { $Help = $true }
+    }
+    $Server = ""
+}
+
 # -- Paths --------------------------------------------------------------------
 $ScriptDir  = $PSScriptRoot
 $ProjectDir = Split-Path -Parent $ScriptDir
@@ -439,7 +452,12 @@ if ($Compiler -eq "mingw") {
         foreach ($rtDll in $runtimeDlls) {
             $rtPath = Join-Path $mingwBin $rtDll
             if (Test-Path $rtPath) {
-                Copy-Item -Force $rtPath "$InstallDir\$rtDll"
+                try {
+                    Copy-Item -Force $rtPath "$InstallDir\$rtDll"
+                } catch {
+                    # DLL may be locked by a running process (tray widget, dashboard)
+                    Write-Warn "Could not update $rtDll (in use by another process) - existing copy will be used"
+                }
             }
         }
         Write-Ok "MinGW runtime DLLs copied"
@@ -517,7 +535,7 @@ $pythonDirs += Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python*" -Direct
 $pythonDirs += Get-ChildItem "C:\Python*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
 $pythonDirs = $pythonDirs | Sort-Object -Unique | Where-Object { Test-Path $_ }
 
-# ALWAYS clean up dangerous DLLs from previous installs (nvcuda.dll, nvml.dll, cudart)
+# Clean up OLD gpushare DLLs from previous installs (will be re-installed below with fresh copies)
 $allOverrideDlls = @("nvcuda.dll", "nvml.dll", "cudart64_12.dll", "cudart64_130.dll")
 foreach ($pyDir in $pythonDirs) {
     foreach ($dll in $allOverrideDlls) {
@@ -529,29 +547,7 @@ foreach ($pyDir in $pythonDirs) {
         $ourSize = (Get-Item $ourDll).Length
         if ($dstSize -eq $ourSize) {
             Remove-Item -Force $dllPath -ErrorAction SilentlyContinue
-            Write-Ok "Cleaned up gpushare $dll from $pyDir"
-        }
-    }
-    # Also clean torch\lib
-    $torchLib = Join-Path $pyDir "Lib\site-packages\torch\lib"
-    if (Test-Path $torchLib) {
-        foreach ($dll in $allOverrideDlls) {
-            $dllPath = Join-Path $torchLib $dll
-            if (-not (Test-Path $dllPath)) { continue }
-            $ourDll = Join-Path $InstallDir $dll
-            if (-not (Test-Path $ourDll)) { continue }
-            $dstSize = (Get-Item $dllPath).Length
-            $ourSize = (Get-Item $ourDll).Length
-            if ($dstSize -eq $ourSize) {
-                $backupPath = Join-Path $realBackupDir "torch_$dll"
-                if (Test-Path $backupPath) {
-                    Copy-Item -Force $backupPath $dllPath
-                    Write-Ok "Restored original $dll in torch\lib"
-                } else {
-                    Remove-Item -Force $dllPath -ErrorAction SilentlyContinue
-                    Write-Ok "Removed gpushare $dll from torch\lib"
-                }
-            }
+            Write-Info "Removed old gpushare $dll from $pyDir (will reinstall)"
         }
     }
 }
@@ -570,10 +566,37 @@ $hookSrc = Join-Path $ProjectDir "python\gpushare_hook.py"
 $pthSrc  = Join-Path $ProjectDir "python\gpushare.pth"
 $hookInstalled = $false
 if ((Test-Path $hookSrc) -and (Test-Path $pthSrc)) {
+    # Ask Python itself where site-packages is (works for MS Store, standard, conda, etc.)
+    $siteDirs = @()
+    foreach ($pyExeName in @("python", "python3")) {
+        $pyExe = Get-Command $pyExeName -ErrorAction SilentlyContinue
+        if (-not $pyExe) { continue }
+        try {
+            $pyOutput = & $pyExe.Source -c "import site; print('|'.join(site.getsitepackages()))" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $pyOutput) {
+                $siteDirs += $pyOutput.Split('|') | Where-Object { $_ -ne "" }
+            }
+            # Also get the user site-packages
+            $pyUserSite = & $pyExe.Source -c "import site; print(site.getusersitepackages())" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $pyUserSite -and $pyUserSite.Trim() -ne "") {
+                $siteDirs += $pyUserSite.Trim()
+            }
+        } catch { }
+    }
+    # Also try guessing for standard installs (fallback)
     foreach ($pyDir in $pythonDirs) {
-        # Install to the main site-packages
-        $siteDir = Join-Path $pyDir "Lib\site-packages"
-        if (-not (Test-Path $siteDir)) { continue }
+        $guessDir = Join-Path $pyDir "Lib\site-packages"
+        if (Test-Path $guessDir) {
+            $siteDirs += $guessDir
+        }
+    }
+    $siteDirs = $siteDirs | Sort-Object -Unique
+
+    foreach ($siteDir in $siteDirs) {
+        # Create directory if it does not exist (e.g., user site-packages)
+        if (-not (Test-Path $siteDir)) {
+            try { New-Item -ItemType Directory -Force -Path $siteDir | Out-Null } catch { continue }
+        }
         try {
             Copy-Item -Force $hookSrc (Join-Path $siteDir "gpushare_hook.py")
             Copy-Item -Force $pthSrc  (Join-Path $siteDir "gpushare.pth")
@@ -582,59 +605,144 @@ if ((Test-Path $hookSrc) -and (Test-Path $pthSrc)) {
         } catch {
             Write-Warn "Could not install hook to $siteDir : $_"
         }
-        # Also install to any virtualenvs under common locations
-        $venvDirs = @()
-        $venvDirs += Get-ChildItem (Join-Path $pyDir "Lib\site-packages") -Filter "virtualenv*" -Directory -ErrorAction SilentlyContinue
-        foreach ($venvSite in (Get-ChildItem "$env:USERPROFILE\*\Lib\site-packages" -Directory -ErrorAction SilentlyContinue)) {
-            try {
-                Copy-Item -Force $hookSrc (Join-Path $venvSite.FullName "gpushare_hook.py")
-                Copy-Item -Force $pthSrc  (Join-Path $venvSite.FullName "gpushare.pth")
-            } catch { }
-        }
     }
     if (-not $hookInstalled) {
         Write-Warn "No Python site-packages directories found for hook installation"
+        Write-Info "Manual install: copy gpushare_hook.py and gpushare.pth to your Python site-packages"
     }
 } else {
     Write-Warn "Hook files not found in $ProjectDir\python - PyTorch integration will be limited"
 }
 
+# Install DLL overrides into Python directories for BOTH local+remote and remote-only.
+# The C library handles dual-GPU routing internally:
+#   - Device 0..N-1 -> local GPU (via backed-up real DLLs in C:\Program Files\gpushare\real\)
+#   - Device N+     -> remote GPU (via TCP to gpushare server)
+# This is safe because our cudaDeviceGetAttribute and cudaGetDeviceProperties now
+# return correct values for all attributes PyTorch checks (40+ attrs, full cudaDeviceProp).
 if ($HasLocalGpu) {
-    # LOCAL GPU PRESENT: Do NOT override DLLs (breaks c10_cuda.dll).
-    # The startup hook handles remote GPU discovery via TCP fallback.
-    Write-Info "Local GPU detected - hook uses TCP fallback for remote GPU discovery"
-    Write-Info "Remote GPU will appear as a native CUDA device in PyTorch"
+    Write-Info "Local GPU detected - installing dual-GPU DLL overrides..."
+    Write-Info "  Device 0: $localGpuName (local, via backed-up real DLLs)"
+    Write-Info "  Device 1+: remote GPU (via gpushare server)"
 } else {
-    # NO LOCAL GPU: Safe to override DLLs for transparent CUDA interception.
-    # Applications load our nvcuda.dll/cudart64_*.dll and all GPU calls
-    # are forwarded to the remote server. Hook still needed for PyTorch SM checks.
-    Write-Info "No local GPU - installing transparent CUDA DLL overrides..."
-    $overrideDlls = @("nvcuda.dll", "nvml.dll", "cudart64_12.dll", "cudart64_130.dll")
-    foreach ($pyDir in $pythonDirs) {
-        $count = 0
-        foreach ($dll in $overrideDlls) {
-            $srcDll = Join-Path $InstallDir $dll
-            $dstDll = Join-Path $pyDir $dll
-            if (-not (Test-Path $srcDll)) { continue }
-            if (Test-Path $dstDll) {
-                $backupPath = Join-Path $realBackupDir "python_$dll"
-                $realSize = (Get-Item $dstDll).Length
-                $ourSize = (Get-Item $srcDll).Length
-                if (($realSize -ne $ourSize) -and (-not (Test-Path $backupPath))) {
-                    Copy-Item -Force $dstDll $backupPath
-                }
-            }
-            try {
-                Copy-Item -Force $srcDll $dstDll
-                $count++
-            } catch {
-                Write-Warn "Could not copy $dll to $pyDir : $_"
+    Write-Info "No local GPU - installing remote-only DLL overrides..."
+}
+
+$overrideDlls = @("nvcuda.dll", "nvml.dll", "cudart64_12.dll", "cudart64_130.dll")
+foreach ($pyDir in $pythonDirs) {
+    $count = 0
+    foreach ($dll in $overrideDlls) {
+        $srcDll = Join-Path $InstallDir $dll
+        $dstDll = Join-Path $pyDir $dll
+        if (-not (Test-Path $srcDll)) { continue }
+        if (Test-Path $dstDll) {
+            $backupPath = Join-Path $realBackupDir "python_$dll"
+            $realSize = (Get-Item $dstDll).Length
+            $ourSize = (Get-Item $srcDll).Length
+            if (($realSize -ne $ourSize) -and (-not (Test-Path $backupPath))) {
+                Copy-Item -Force $dstDll $backupPath
+                Write-Info "Backed up existing $dll from $pyDir"
             }
         }
-        if ($count -gt 0) {
-            Write-Ok "Installed $count DLLs to $pyDir"
+        try {
+            Copy-Item -Force $srcDll $dstDll
+            $count++
+        } catch {
+            Write-Warn "Could not copy $dll to $pyDir : $_"
         }
     }
+    if ($count -gt 0) {
+        Write-Ok "Installed $count DLLs to $pyDir"
+    }
+}
+# Install into torch\lib - this is CRITICAL for DLL override because:
+# 1. MS Store Python's app dir is read-only (WindowsApps sandbox)
+# 2. System PATH comes AFTER System32 in DLL search order
+# 3. PyTorch adds torch\lib via os.add_dll_directory() which DOES take priority
+# Find torch\lib using multiple strategies (MS Store, standard, conda, venv)
+$torchLibDirs = @()
+
+# Strategy 1: Use $siteDirs from hook install (already discovered via site.getsitepackages())
+if ($siteDirs) {
+    foreach ($sd in $siteDirs) {
+        $tl = Join-Path $sd "torch\lib"
+        if (Test-Path $tl) { $torchLibDirs += $tl }
+    }
+}
+
+# Strategy 2: Ask Python directly (may fail if running as admin with different env)
+foreach ($pyExeName in @("python", "python3")) {
+    $pyExe = Get-Command $pyExeName -ErrorAction SilentlyContinue
+    if (-not $pyExe) { continue }
+    try {
+        $torchLibPath = & $pyExe.Source -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $torchLibPath -and (Test-Path $torchLibPath.Trim())) {
+            $torchLibDirs += $torchLibPath.Trim()
+        }
+    } catch { }
+}
+
+# Strategy 3: Guess standard paths
+foreach ($pyDir in $pythonDirs) {
+    $guessDir = Join-Path $pyDir "Lib\site-packages\torch\lib"
+    if (Test-Path $guessDir) { $torchLibDirs += $guessDir }
+}
+
+# Strategy 4: Search MS Store Python package directories
+$msStoreBase = Join-Path $env:LOCALAPPDATA "Packages"
+if (Test-Path $msStoreBase) {
+    $pyPkgs = Get-ChildItem $msStoreBase -Filter "PythonSoftwareFoundation.Python*" -Directory -ErrorAction SilentlyContinue
+    foreach ($pkg in $pyPkgs) {
+        $localPkgs = Join-Path $pkg.FullName "LocalCache\local-packages"
+        if (-not (Test-Path $localPkgs)) { continue }
+        $pyVerDirs = Get-ChildItem $localPkgs -Filter "Python*" -Directory -ErrorAction SilentlyContinue
+        foreach ($pyVer in $pyVerDirs) {
+            $tl = Join-Path $pyVer.FullName "site-packages\torch\lib"
+            if (Test-Path $tl) { $torchLibDirs += $tl }
+        }
+    }
+}
+
+# Strategy 5: Conda environments
+$condaBase = Join-Path $env:USERPROFILE "miniconda3\envs"
+if (-not (Test-Path $condaBase)) { $condaBase = Join-Path $env:USERPROFILE "anaconda3\envs" }
+if (Test-Path $condaBase) {
+    $condaEnvs = Get-ChildItem $condaBase -Directory -ErrorAction SilentlyContinue
+    foreach ($env_ in $condaEnvs) {
+        $tl = Join-Path $env_.FullName "Lib\site-packages\torch\lib"
+        if (Test-Path $tl) { $torchLibDirs += $tl }
+    }
+}
+$torchLibDirs = $torchLibDirs | Sort-Object -Unique
+
+foreach ($torchLib in $torchLibDirs) {
+    $count = 0
+    foreach ($dll in $overrideDlls) {
+        $srcDll = Join-Path $InstallDir $dll
+        $dstDll = Join-Path $torchLib $dll
+        if (-not (Test-Path $srcDll)) { continue }
+        if (Test-Path $dstDll) {
+            $backupPath = Join-Path $realBackupDir "torch_$dll"
+            $realSize = (Get-Item $dstDll).Length
+            $ourSize = (Get-Item $srcDll).Length
+            if (($realSize -ne $ourSize) -and (-not (Test-Path $backupPath))) {
+                Copy-Item -Force $dstDll $backupPath
+                Write-Info "Backed up existing $dll from torch\lib"
+            }
+        }
+        try {
+            Copy-Item -Force $srcDll $dstDll
+            $count++
+        } catch {
+            Write-Warn "Could not copy $dll to $torchLib : $_"
+        }
+    }
+    if ($count -gt 0) {
+        Write-Ok "Installed $count DLLs to $torchLib"
+    }
+}
+if ($torchLibDirs.Count -eq 0) {
+    Write-Info "PyTorch not found - DLLs installed to PATH only (install PyTorch then re-run installer)"
 }
 
 # (torch\lib cleanup already handled above in the cleanup loop)
@@ -759,22 +867,36 @@ if (-not $SkipPython) {
             if ($LASTEXITCODE -eq 0) { $hasPip = $true }
         } catch { }
 
-        $pythonDir = Join-Path $ProjectDir "python"
-        if ($hasPip -and (Test-Path $pythonDir)) {
+        $pythonPkgDir = Join-Path $ProjectDir "python"
+        if ($hasPip -and (Test-Path $pythonPkgDir)) {
             Write-Info "Installing gpushare Python package..."
             try {
-                $pipArgs = @("-m", "pip", "install", $pythonDir, "--quiet", "--no-warn-script-location")
-                $pipResult = Start-Process -FilePath $pythonExe -ArgumentList $pipArgs -Wait -PassThru -NoNewWindow 2>$null
-                if ($pipResult.ExitCode -eq 0) {
+                # Use & operator with proper quoting (Start-Process mangles paths with spaces/parens)
+                & $pythonExe -m pip install "$pythonPkgDir" --quiet --no-warn-script-location 2>$null
+                if ($LASTEXITCODE -eq 0) {
                     Write-Ok "Python client package installed"
                 } else {
-                    # Try without --quiet in case of pip version issues
-                    $pipArgs2 = @("-m", "pip", "install", $pythonDir)
-                    $pipResult2 = Start-Process -FilePath $pythonExe -ArgumentList $pipArgs2 -Wait -PassThru -NoNewWindow 2>$null
-                    if ($pipResult2.ExitCode -eq 0) {
+                    # Retry without --quiet
+                    & $pythonExe -m pip install "$pythonPkgDir" 2>$null
+                    if ($LASTEXITCODE -eq 0) {
                         Write-Ok "Python client package installed"
                     } else {
-                        Write-Warn "Python client install returned non-zero (non-fatal)"
+                        Write-Warn "pip install failed - copying package files directly"
+                        # Direct copy fallback: copy the gpushare package to site-packages
+                        $gpusharePkg = Join-Path $pythonPkgDir "gpushare"
+                        if (Test-Path $gpusharePkg) {
+                            foreach ($sDir in $siteDirs) {
+                                if (-not (Test-Path $sDir)) { continue }
+                                $dstPkg = Join-Path $sDir "gpushare"
+                                try {
+                                    if (Test-Path $dstPkg) { Remove-Item -Recurse -Force $dstPkg }
+                                    Copy-Item -Recurse -Force $gpusharePkg $dstPkg
+                                    Write-Ok "Copied gpushare package to $sDir"
+                                } catch {
+                                    Write-Warn "Could not copy to $sDir : $_"
+                                }
+                            }
+                        }
                     }
                 }
             } catch {
@@ -782,8 +904,8 @@ if (-not $SkipPython) {
             }
         } elseif (-not $hasPip) {
             Write-Warn "pip not found -skipping Python client package"
-        } elseif (-not (Test-Path $pythonDir)) {
-            Write-Warn "Python package directory not found at $pythonDir -skipping"
+        } elseif (-not (Test-Path $pythonPkgDir)) {
+            Write-Warn "Python package directory not found at $pythonPkgDir -skipping"
         }
     } else {
         Write-Warn "Python not found in PATH -skipping Python client"
@@ -1024,12 +1146,12 @@ foreach ($dll in $apiDlls) {
     Write-Host "    $dll" -ForegroundColor Gray
 }
 Write-Host ""
-if ($HasLocalGpu) {
-Write-Host "  Local GPU:       " -NoNewline; Write-Host "$localGpuName" -ForegroundColor Green
-Write-Host "  Remote GPU:      " -NoNewline; Write-Host "via gpushare (auto-detected by PyTorch)" -ForegroundColor Cyan
-Write-Host "  Integration:     " -NoNewline; Write-Host "Python startup hook" -ForegroundColor Green -NoNewline; Write-Host " (patches torch.cuda at import time)"
-} else {
 Write-Host "  CUDA override:   " -NoNewline; Write-Host "ACTIVE" -ForegroundColor Green
+if ($HasLocalGpu) {
+Write-Host "  Local GPU:       " -NoNewline; Write-Host "$localGpuName (device 0, via backed-up real DLLs)" -ForegroundColor Green
+Write-Host "  Remote GPU:      " -NoNewline; Write-Host "via gpushare server (device 1+)" -ForegroundColor Cyan
+Write-Host "  Integration:     " -NoNewline; Write-Host "DLL override + Python hook" -ForegroundColor Green -NoNewline; Write-Host " (dual-GPU: local passthrough + remote forwarding)"
+} else {
 Write-Host "                   All GPU apps will use the remote GPU transparently."
 }
 Write-Host "  API coverage:    2620+ functions (cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSOLVER, cuRAND, NVRTC)"

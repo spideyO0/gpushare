@@ -309,14 +309,53 @@ fi
 
 # ── 7. Install Python client ─────────────────────────────────────────────────
 if [[ "$SKIP_PYTHON" == false ]]; then
-    if command -v python3 >/dev/null 2>&1 && command -v pip3 >/dev/null 2>&1; then
-        info "Installing Python client package..."
-        pip3 install "$PROJECT_DIR/python/" 2>/dev/null \
-            || pip3 install --user "$PROJECT_DIR/python/" 2>/dev/null \
-            || warn "Python client install failed (non-fatal)"
-        ok "Python client installed"
+    if command -v python3 >/dev/null 2>&1; then
+        # Install Python client package via pip
+        if command -v pip3 >/dev/null 2>&1; then
+            info "Installing Python client package..."
+            pip3 install "$PROJECT_DIR/python/" 2>/dev/null \
+                || pip3 install --user "$PROJECT_DIR/python/" 2>/dev/null \
+                || warn "Python client install failed (non-fatal)"
+            ok "Python client installed"
+        else
+            warn "pip3 not found — skipping Python client package"
+        fi
+
+        # Install Python startup hook (patches torch.cuda for remote GPUs)
+        info "Installing Python startup hook..."
+        local hook_src="$PROJECT_DIR/python/gpushare_hook.py"
+        local pth_src="$PROJECT_DIR/python/gpushare.pth"
+        if [[ -f "$hook_src" ]] && [[ -f "$pth_src" ]]; then
+            local hook_installed=false
+            for site_dir in $(python3 -c "import site; print(' '.join(site.getsitepackages()))" 2>/dev/null); do
+                if [[ -d "$site_dir" ]]; then
+                    cp "$hook_src" "$site_dir/gpushare_hook.py" 2>/dev/null && \
+                    cp "$pth_src" "$site_dir/gpushare.pth" 2>/dev/null && \
+                    hook_installed=true && \
+                    ok "Installed startup hook to $site_dir"
+                fi
+            done
+            # Also try user site-packages
+            local user_site
+            user_site=$(python3 -c "import site; print(site.getusersitepackages())" 2>/dev/null || true)
+            if [[ -n "$user_site" ]]; then
+                mkdir -p "$user_site" 2>/dev/null || true
+                cp "$hook_src" "$user_site/gpushare_hook.py" 2>/dev/null && \
+                cp "$pth_src" "$user_site/gpushare.pth" 2>/dev/null && \
+                hook_installed=true && \
+                ok "Installed startup hook to $user_site"
+            fi
+            if [[ "$hook_installed" == false ]]; then
+                warn "Could not install startup hook to any site-packages"
+            fi
+            # Clear quarantine on hook files
+            xattr -dr com.apple.quarantine "$hook_src" 2>/dev/null || true
+            xattr -dr com.apple.quarantine "$pth_src" 2>/dev/null || true
+        else
+            warn "Hook files not found in $PROJECT_DIR/python/"
+        fi
     else
-        warn "python3/pip3 not found — skipping Python client"
+        warn "python3 not found — skipping Python client"
     fi
 else
     info "Skipping Python client (--skip-python)"

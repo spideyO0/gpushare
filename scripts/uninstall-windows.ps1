@@ -215,6 +215,76 @@ if (-not $hasPyPkg) {
     Write-Info "Python package 'gpushare' - not found"
 }
 
+# 6b. Python startup hook files (gpushare_hook.py + gpushare.pth in site-packages)
+$hookFiles = @()
+$hookSiteDirs = @()
+# Discover site-packages via Python
+foreach ($pyExeName in @("python", "python3")) {
+    $pyExe = Get-Command $pyExeName -ErrorAction SilentlyContinue
+    if (-not $pyExe) { continue }
+    try {
+        $pyOutput = & $pyExe.Source -c "import site; print('|'.join(site.getsitepackages()))" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $pyOutput) {
+            $hookSiteDirs += $pyOutput.Split('|') | Where-Object { $_ -ne "" }
+        }
+        $pyUserSite = & $pyExe.Source -c "import site; print(site.getusersitepackages())" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $pyUserSite -and $pyUserSite.Trim() -ne "") {
+            $hookSiteDirs += $pyUserSite.Trim()
+        }
+    } catch { }
+}
+# Also scan MS Store Python package directories
+$msStoreBase = Join-Path $env:LOCALAPPDATA "Packages"
+if (Test-Path $msStoreBase) {
+    $pyPkgs = Get-ChildItem $msStoreBase -Filter "PythonSoftwareFoundation.Python*" -Directory -ErrorAction SilentlyContinue
+    foreach ($pkg in $pyPkgs) {
+        $localPkgs = Join-Path $pkg.FullName "LocalCache\local-packages"
+        if (-not (Test-Path $localPkgs)) { continue }
+        $pyVerDirs = Get-ChildItem $localPkgs -Filter "Python*" -Directory -ErrorAction SilentlyContinue
+        foreach ($pyVer in $pyVerDirs) {
+            $hookSiteDirs += Join-Path $pyVer.FullName "site-packages"
+        }
+    }
+}
+$hookSiteDirs = $hookSiteDirs | Sort-Object -Unique
+foreach ($sd in $hookSiteDirs) {
+    $hf = Join-Path $sd "gpushare_hook.py"
+    $pf = Join-Path $sd "gpushare.pth"
+    if (Test-Path $hf) { $hookFiles += $hf; $found = $true }
+    if (Test-Path $pf) { $hookFiles += $pf; $found = $true }
+}
+if ($hookFiles.Count -gt 0) {
+    Write-Action "REMOVE" "Python startup hook ($($hookFiles.Count) files across site-packages)"
+} else {
+    Write-Info "Python startup hook - not found"
+}
+
+# 6c. DLLs in torch\lib (critical override location)
+$torchLibDlls = @()
+foreach ($sd in $hookSiteDirs) {
+    $torchLib = Join-Path $sd "torch\lib"
+    if (-not (Test-Path $torchLib)) { continue }
+    foreach ($dll in $criticalDlls) {
+        $dllPath = Join-Path $torchLib $dll
+        if ((Test-Path $dllPath) -and $ourSize -gt 0) {
+            $dllSize = (Get-Item $dllPath).Length
+            if ($dllSize -eq $ourSize) {
+                $torchLibDlls += @{ Path = $dllPath; Dll = $dll; Dir = $torchLib }
+                $found = $true
+            }
+        }
+    }
+}
+if ($torchLibDlls.Count -gt 0) {
+    $uniqueTorchDirs = ($torchLibDlls | ForEach-Object { $_.Dir } | Sort-Object -Unique)
+    foreach ($d in $uniqueTorchDirs) {
+        $dlls = ($torchLibDlls | Where-Object { $_.Dir -eq $d } | ForEach-Object { $_.Dll }) -join ", "
+        Write-Action "REMOVE" "DLL overrides in torch\lib: $d ($dlls)"
+    }
+} else {
+    Write-Info "torch\lib DLL overrides - not found"
+}
+
 # 7. Startup shortcut (GPU tray widget)
 $startupDir = [Environment]::GetFolderPath("Startup")
 $trayShortcut = Join-Path $startupDir "gpushare GPU Monitor.lnk"
@@ -400,7 +470,34 @@ if ($hasPathEntry) {
     }
 }
 
-# 7b. Remove gpushare DLL overrides from Python directories
+# 7b. Remove Python startup hook files
+foreach ($hf in $hookFiles) {
+    try {
+        Remove-Item -Force $hf -ErrorAction Stop
+        Write-Ok "Removed $hf"
+    } catch {
+        Write-Warn "Could not remove $hf : $_"
+    }
+}
+
+# 7c. Remove DLL overrides from torch\lib
+foreach ($entry in $torchLibDlls) {
+    try {
+        $backupName = "torch_$($entry.Dll)"
+        $backupPath = Join-Path $realBackupDir $backupName
+        if (Test-Path $backupPath) {
+            Copy-Item -Force $backupPath $entry.Path
+            Write-Ok "Restored original $($entry.Dll) in $($entry.Dir)"
+        } else {
+            Remove-Item -Force $entry.Path -ErrorAction SilentlyContinue
+            Write-Ok "Removed $($entry.Dll) from $($entry.Dir)"
+        }
+    } catch {
+        Write-Warn "Could not clean $($entry.Dll) in $($entry.Dir): $_"
+    }
+}
+
+# 7d. Remove gpushare DLL overrides from Python directories
 foreach ($entry in $overriddenDirs) {
     try {
         # Check if we have a backup to restore

@@ -2130,6 +2130,55 @@ GPUSHARE_EXPORT CUresult cuPointerGetAttribute(void *data, int attribute, CUdevi
     return CUDA_SUCCESS;
 }
 
+/* ── cuGetProcAddress — CUDA 12+ dynamic symbol resolver ────────────────── */
+/* PyTorch/c10_cuda.dll calls this to resolve ALL CUDA functions at runtime.
+ * Without it, c10_cuda.dll fails with WinError 127 "procedure not found".
+ * We look up the symbol in our own library and return the function pointer. */
+
+#ifdef _WIN32
+  #include <libloaderapi.h>
+  static void *_self_sym(const char *name) {
+      /* Get handle to our own DLL, then look up the symbol */
+      static HMODULE self = NULL;
+      if (!self) {
+          /* Get the module handle for THIS DLL (not the exe) */
+          GetModuleHandleExA(
+              GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+              (LPCSTR)_self_sym, &self);
+          if (!self) self = GetModuleHandleA(NULL);
+      }
+      return (void*)GetProcAddress(self, name);
+  }
+#else
+  static void *_self_sym(const char *name) {
+      return dlsym(RTLD_DEFAULT, name);
+  }
+#endif
+
+GPUSHARE_EXPORT CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion, uint64_t flags) {
+    (void)cudaVersion; (void)flags;
+    if (!symbol || !pfn) return CUDA_ERROR_INVALID_VALUE;
+    *pfn = _self_sym(symbol);
+    if (*pfn) return CUDA_SUCCESS;
+    /* Symbol not found — try with version suffixes that CUDA sometimes uses */
+    char versioned[256];
+    snprintf(versioned, sizeof(versioned), "%s_v2", symbol);
+    *pfn = _self_sym(versioned);
+    if (*pfn) return CUDA_SUCCESS;
+    TRACE("cuGetProcAddress: not found: %s", symbol);
+    return CUDA_ERROR_NOT_FOUND;
+}
+
+GPUSHARE_EXPORT CUresult cuGetProcAddress_v2(const char *symbol, void **pfn,
+                                              int cudaVersion, uint64_t flags,
+                                              int *symbolStatus) {
+    CUresult r = cuGetProcAddress(symbol, pfn, cudaVersion, flags);
+    if (symbolStatus) {
+        *symbolStatus = (r == CUDA_SUCCESS) ? 1 : 0;  /* 1 = found, 0 = not found */
+    }
+    return r;
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
  * NVML API exports — makes this library also work as libnvidia-ml.so.1
  *

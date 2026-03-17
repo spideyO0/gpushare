@@ -35,40 +35,88 @@ _libcuda = None
 # ════════════════════════════════════════════════════════════
 
 def _load_cuda_lib():
-    """Load the CUDA driver library (our gpushare client on clients)."""
+    """Load the CUDA driver library.
+
+    On Windows, we MUST load our gpushare DLL by full path BEFORE the generic
+    'nvcuda.dll' search, because the generic search finds the real NVIDIA driver
+    in System32 first. Loading our DLL first also preloads it in the process so
+    that PyTorch's C++ code (which loads nvcuda.dll by name) gets ours via
+    Windows' already-loaded-DLL base-name matching.
+    """
     global _libcuda
     if _libcuda is not None:
         return _libcuda
 
-    if sys.platform == 'linux':
-        names = ['libcuda.so.1', 'libcuda.so']
-    elif sys.platform == 'darwin':
-        names = ['libcuda.dylib', 'libcuda.1.dylib']
-    elif sys.platform == 'win32':
-        names = ['nvcuda.dll']
-    else:
-        return None
+    if sys.platform == 'win32':
+        # On Windows: try our gpushare DLL by FULL PATH first.
+        # This ensures we load ours, not the real nvcuda.dll from System32.
+        # Once loaded, Windows will reuse it for any subsequent LoadLibrary('nvcuda.dll')
+        # calls (including from PyTorch's _C.pyd) because of base-name matching.
+        gpushare_paths = []
 
-    for name in names:
+        # 1. torch\lib (highest priority - PyTorch adds this via os.add_dll_directory)
         try:
-            _libcuda = ctypes.CDLL(name)
+            torch_mod = sys.modules.get('torch')
+            if torch_mod and hasattr(torch_mod, '__file__'):
+                tlib = os.path.join(os.path.dirname(torch_mod.__file__), 'lib')
+                gpushare_paths.append(os.path.join(tlib, 'nvcuda.dll'))
+        except Exception:
+            pass
+        # Also try common torch locations for MS Store Python
+        for pyExe in [sys.executable]:
+            if pyExe:
+                # Standard Python: <python_dir>/Lib/site-packages/torch/lib
+                sp = os.path.join(os.path.dirname(pyExe), 'Lib', 'site-packages', 'torch', 'lib')
+                gpushare_paths.append(os.path.join(sp, 'nvcuda.dll'))
+                # MS Store Python user packages
+                lp = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Packages')
+                if os.path.isdir(lp):
+                    for pkg in os.listdir(lp):
+                        if 'Python' in pkg:
+                            tp = os.path.join(lp, pkg, 'LocalCache', 'local-packages')
+                            for pyver in os.listdir(tp) if os.path.isdir(tp) else []:
+                                sp2 = os.path.join(tp, pyver, 'site-packages', 'torch', 'lib')
+                                gpushare_paths.append(os.path.join(sp2, 'nvcuda.dll'))
+
+        # 2. gpushare install directory
+        pf = os.environ.get('ProgramFiles', r'C:\Program Files')
+        gpushare_paths.append(os.path.join(pf, 'gpushare', 'nvcuda.dll'))
+        gpushare_paths.append(os.path.join(pf, 'gpushare', 'gpushare_client.dll'))
+
+        # 3. Python directory
+        gpushare_paths.append(os.path.join(os.path.dirname(sys.executable), 'nvcuda.dll'))
+
+        for path in gpushare_paths:
+            if not os.path.isfile(path):
+                continue
+            try:
+                _libcuda = ctypes.CDLL(path)
+                return _libcuda
+            except OSError:
+                continue
+
+        # 4. Fallback: generic name (will find System32 real driver)
+        try:
+            _libcuda = ctypes.CDLL('nvcuda.dll')
             return _libcuda
         except OSError:
-            continue
+            pass
 
-    # Also try gpushare-specific paths on Windows
-    if sys.platform == 'win32':
-        for extra in [
-            os.path.join(os.environ.get('ProgramFiles', r'C:\Program Files'), 'gpushare', 'nvcuda.dll'),
-            os.path.join(os.environ.get('ProgramFiles', r'C:\Program Files'), 'gpushare', 'gpushare_client.dll'),
-            os.path.join(sys.prefix, 'nvcuda.dll'),
-        ]:
-            if os.path.isfile(extra):
-                try:
-                    _libcuda = ctypes.CDLL(extra)
-                    return _libcuda
-                except OSError:
-                    continue
+    elif sys.platform == 'linux':
+        for name in ['libcuda.so.1', 'libcuda.so']:
+            try:
+                _libcuda = ctypes.CDLL(name)
+                return _libcuda
+            except OSError:
+                continue
+
+    elif sys.platform == 'darwin':
+        for name in ['libcuda.dylib', 'libcuda.1.dylib']:
+            try:
+                _libcuda = ctypes.CDLL(name)
+                return _libcuda
+            except OSError:
+                continue
 
     path = ctypes.util.find_library('cuda')
     if path:
@@ -410,7 +458,7 @@ class _CleanNameProps:
 # ════════════════════════════════════════════════════════════
 
 def _do_patch():
-    """Apply all PyTorch patches. Called once when torch.cuda is imported."""
+    """Apply all PyTorch patches. Called once when torch.cuda is fully loaded."""
     global _patched
 
     with _lock:
@@ -421,11 +469,20 @@ def _do_patch():
     if _device_count == 0:
         return
 
-    try:
-        import torch
-        import torch.cuda
-    except ImportError:
+    # Use sys.modules directly — do NOT call `import torch` here.
+    # The import-depth tracking in install() guarantees these are fully loaded.
+    torch = sys.modules.get('torch')
+    torch_cuda = sys.modules.get('torch.cuda')
+    if torch is None or torch_cuda is None:
+        _patched = False  # retry later
         return
+
+    # Use local refs — avoids any further import calls inside _do_patch
+    tc = torch_cuda
+
+    # Determine how many GPUs are local vs remote
+    _local_gpu_count = sum(1 for d in _devices if not d.get('is_remote'))
+    _active_device = [0]  # track current device (local or remote)
 
     # Collect SM architectures from all detected devices
     sm_archs = set()
@@ -433,41 +490,39 @@ def _do_patch():
         sm_archs.add(f"sm_{d['major']}{d['minor']}")
 
     # ── 1. get_arch_list — include remote GPU SM architectures ──
-    # Without this, PyTorch rejects GPUs whose SM isn't in its compiled arch list
-    if hasattr(torch.cuda, 'get_arch_list'):
-        _orig_get_arch_list = torch.cuda.get_arch_list
+    if hasattr(tc, 'get_arch_list'):
+        _orig_get_arch_list = tc.get_arch_list
         def _patched_get_arch_list():
             archs = list(_orig_get_arch_list())
             for sm in sm_archs:
                 if sm not in archs:
                     archs.append(sm)
             return archs
-        torch.cuda.get_arch_list = _patched_get_arch_list
+        tc.get_arch_list = _patched_get_arch_list
 
     # ── 2. Neutralize capability / cubin checks ──
-    # These functions print warnings or raise errors for unknown SM versions
     for name in ('_check_capability', '_check_cubins'):
-        if hasattr(torch.cuda, name):
-            setattr(torch.cuda, name, lambda: None)
+        if hasattr(tc, name):
+            setattr(tc, name, lambda: None)
 
     # ── 3. is_available — True if we have any GPUs ──
-    _orig_is_available = torch.cuda.is_available
+    _orig_is_available = tc.is_available
     def _patched_is_available():
         if _device_count > 0:
             return True
         return _orig_is_available()
-    torch.cuda.is_available = _patched_is_available
+    tc.is_available = _patched_is_available
 
     # ── 4. device_count — correct count ──
-    _orig_device_count = torch.cuda.device_count
+    _orig_device_count = tc.device_count
     def _patched_device_count():
         c = _orig_device_count()
         return max(c, _device_count)
-    torch.cuda.device_count = _patched_device_count
+    tc.device_count = _patched_device_count
 
     # ── 5. get_device_capability — ctypes fallback ──
-    if hasattr(torch.cuda, 'get_device_capability'):
-        _orig_get_cap = torch.cuda.get_device_capability
+    if hasattr(tc, 'get_device_capability'):
+        _orig_get_cap = tc.get_device_capability
         def _patched_get_device_capability(device=None):
             try:
                 return _orig_get_cap(device)
@@ -476,11 +531,11 @@ def _do_patch():
                 if 0 <= idx < len(_devices):
                     return (_devices[idx]['major'], _devices[idx]['minor'])
                 return (0, 0)
-        torch.cuda.get_device_capability = _patched_get_device_capability
+        tc.get_device_capability = _patched_get_device_capability
 
     # ── 6. get_device_name — strip " (remote)" / " (local)" ──
-    if hasattr(torch.cuda, 'get_device_name'):
-        _orig_get_name = torch.cuda.get_device_name
+    if hasattr(tc, 'get_device_name'):
+        _orig_get_name = tc.get_device_name
         def _patched_get_device_name(device=None):
             try:
                 n = _orig_get_name(device)
@@ -490,11 +545,11 @@ def _do_patch():
                 if 0 <= idx < len(_devices):
                     return _devices[idx]['name']
                 return 'Unknown GPU'
-        torch.cuda.get_device_name = _patched_get_device_name
+        tc.get_device_name = _patched_get_device_name
 
     # ── 7. get_device_properties — clean name + fallback ──
-    if hasattr(torch.cuda, 'get_device_properties'):
-        _orig_get_props = torch.cuda.get_device_properties
+    if hasattr(tc, 'get_device_properties'):
+        _orig_get_props = tc.get_device_properties
         def _patched_get_device_properties(device=None):
             try:
                 p = _orig_get_props(device)
@@ -506,11 +561,11 @@ def _do_patch():
                 if 0 <= idx < len(_devices):
                     return _DeviceProps(_devices[idx])
                 raise
-        torch.cuda.get_device_properties = _patched_get_device_properties
+        tc.get_device_properties = _patched_get_device_properties
 
     # ── 8. mem_get_info — ctypes fallback ──
-    if hasattr(torch.cuda, 'mem_get_info'):
-        _orig_mem_info = torch.cuda.mem_get_info
+    if hasattr(tc, 'mem_get_info'):
+        _orig_mem_info = tc.mem_get_info
         def _patched_mem_get_info(device=None):
             try:
                 return _orig_mem_info(device)
@@ -524,21 +579,21 @@ def _do_patch():
                         free = total
                     return (free, total)
                 return (0, 0)
-        torch.cuda.mem_get_info = _patched_mem_get_info
+        tc.mem_get_info = _patched_mem_get_info
 
     # ── 9. memory_allocated — graceful fallback ──
-    if hasattr(torch.cuda, 'memory_allocated'):
-        _orig_mem_alloc = torch.cuda.memory_allocated
+    if hasattr(tc, 'memory_allocated'):
+        _orig_mem_alloc = tc.memory_allocated
         def _patched_memory_allocated(device=None):
             try:
                 return _orig_mem_alloc(device)
             except Exception:
                 return 0
-        torch.cuda.memory_allocated = _patched_memory_allocated
+        tc.memory_allocated = _patched_memory_allocated
 
     # ── 10. _lazy_init — recover from initialization failures ──
-    if hasattr(torch.cuda, '_lazy_init'):
-        _orig_lazy_init = torch.cuda._lazy_init
+    if hasattr(tc, '_lazy_init'):
+        _orig_lazy_init = tc._lazy_init
         _init_done = [False]
         def _patched_lazy_init():
             if _init_done[0]:
@@ -548,22 +603,21 @@ def _do_patch():
                 _init_done[0] = True
             except Exception:
                 if _device_count > 0:
-                    # Force-mark as initialized so PyTorch doesn't block
                     _init_done[0] = True
-                    if hasattr(torch.cuda, '_initialized'):
-                        torch.cuda._initialized = True
-                    if hasattr(torch.cuda, '_queued_calls'):
-                        for fn_and_args in torch.cuda._queued_calls:
+                    if hasattr(tc, '_initialized'):
+                        tc._initialized = True
+                    if hasattr(tc, '_queued_calls'):
+                        for fn_and_args in tc._queued_calls:
                             if callable(fn_and_args):
                                 try: fn_and_args()
                                 except Exception: pass
                             elif isinstance(fn_and_args, (tuple, list)) and len(fn_and_args) >= 1:
                                 try: fn_and_args[0](*fn_and_args[1:])
                                 except Exception: pass
-                        torch.cuda._queued_calls = []
+                        tc._queued_calls = []
                 else:
                     raise
-        torch.cuda._lazy_init = _patched_lazy_init
+        tc._lazy_init = _patched_lazy_init
 
     # ── 11. Suppress SM compatibility warnings ──
     import warnings
@@ -585,41 +639,65 @@ def _do_patch():
     warnings.warn = _filtered_warn
 
     # ── 12. torch.backends.cudnn — enable for remote GPUs ──
-    try:
-        import torch.backends.cudnn as _cudnn
-        if hasattr(_cudnn, 'is_available'):
-            _orig_cudnn_avail = _cudnn.is_available
-            if not _orig_cudnn_avail():
+    _cudnn = sys.modules.get('torch.backends.cudnn')
+    if _cudnn is not None:
+        try:
+            if hasattr(_cudnn, 'is_available') and not _cudnn.is_available():
                 _cudnn.is_available = lambda: True
             if hasattr(_cudnn, 'enabled'):
                 _cudnn.enabled = True
-    except Exception:
-        pass
+        except Exception:
+            pass
 
     # ── 13. torch.backends.cuda.is_built ──
-    try:
-        import torch.backends.cuda as _cuda_be
-        if hasattr(_cuda_be, 'is_built') and not _cuda_be.is_built():
-            _cuda_be.is_built = lambda: True
-    except Exception:
-        pass
+    _cuda_be = sys.modules.get('torch.backends.cuda')
+    if _cuda_be is not None:
+        try:
+            if hasattr(_cuda_be, 'is_built') and not _cuda_be.is_built():
+                _cuda_be.is_built = lambda: True
+        except Exception:
+            pass
 
     # ── 14. torch.version.cuda — set if CPU-only build ──
     try:
-        if getattr(torch.version, 'cuda', None) is None:
-            torch.version.cuda = '13.1'
+        torch_version = getattr(torch, 'version', None)
+        if torch_version and getattr(torch_version, 'cuda', None) is None:
+            torch_version.cuda = '13.1'
     except Exception:
         pass
 
-    # ── 15. current_device — fallback if CUDA init incomplete ──
-    if hasattr(torch.cuda, 'current_device'):
-        _orig_current_device = torch.cuda.current_device
+    # ── 15. set_device — intercept remote device selection ──
+    # On Windows with a local GPU, PyTorch's C++ backend only knows about
+    # local GPUs. set_device(remote_idx) would call _cuda_setDevice which
+    # fails with "invalid device ordinal". We intercept it here.
+    if hasattr(tc, 'set_device'):
+        _orig_set_device = tc.set_device
+        def _patched_set_device(device):
+            idx = _resolve_device(device)
+            _active_device[0] = idx
+            if idx < _local_gpu_count:
+                # Local GPU — delegate to real PyTorch
+                _orig_set_device(device)
+            else:
+                # Remote GPU — don't call C++ backend (it doesn't know about it).
+                # The gpushare C library handles routing when it's loaded.
+                # If C library is NOT the active CUDA driver (Windows with local GPU),
+                # we track the selection here for Python-level queries.
+                pass
+        tc.set_device = _patched_set_device
+
+    # ── 16. current_device — return tracked device ──
+    if hasattr(tc, 'current_device'):
+        _orig_current_device = tc.current_device
         def _patched_current_device():
+            # If a remote device was selected, return it
+            if _active_device[0] >= _local_gpu_count:
+                return _active_device[0]
             try:
                 return _orig_current_device()
             except Exception:
-                return 0
-        torch.cuda.current_device = _patched_current_device
+                return _active_device[0]
+        tc.current_device = _patched_current_device
 
     # Status
     gpus = ', '.join(f"{d['name']} (sm_{d['major']}{d['minor']})" for d in _devices)
@@ -657,22 +735,32 @@ def install():
     if _device_count == 0:
         return
 
-    # Wrap builtins.__import__ to detect torch.cuda loading
+    # Strategy: we CANNOT patch torch.cuda during import because Python adds
+    # submodules to sys.modules BEFORE they finish executing __init__.py.
+    # Checking individual attrs is a race (is_available exists, device_count doesn't).
+    #
+    # Fix: track import nesting depth. Only patch when depth returns to 0,
+    # which means ALL imports (including torch's internal sub-imports) have
+    # finished. This guarantees torch.cuda is fully initialized.
+
     _real_import = builtins.__import__
-    _hooking = threading.local()
+    _depth = [0]
 
     def _import_hook(name, *args, **kwargs):
-        module = _real_import(name, *args, **kwargs)
-        if not _patched and not getattr(_hooking, 'active', False):
-            # Patch once torch.cuda is fully loaded
+        _depth[0] += 1
+        try:
+            module = _real_import(name, *args, **kwargs)
+        finally:
+            _depth[0] -= 1
+
+        # Only patch when we're back at the top level (all imports done)
+        if _depth[0] == 0 and not _patched:
             if 'torch.cuda' in sys.modules:
-                _hooking.active = True
                 try:
                     _do_patch()
                 except Exception as e:
                     sys.stderr.write(f"[gpushare] Hook error: {e}\n")
-                finally:
-                    _hooking.active = False
+
         return module
 
     builtins.__import__ = _import_hook
