@@ -252,4 +252,6 @@ CMakeFiles/gpushare-server.dir/server/server.cpp.o: \
  /opt/cuda/targets/x86_64-linux/include/vector_functions.hpp \
  /usr/include/c++/15.2.1/utility \
  /usr/include/c++/15.2.1/bits/stl_relops.h \
- /home/spideyo0/gpushare/include/gpushare/protocol.h
+ /home/spideyo0/gpushare/include/gpushare/protocol.h \
+ /home/spideyo0/gpushare/include/gpushare/transport.h \
+ /usr/include/netdb.h /usr/include/rpc/netdb.h /usr/include/bits/netdb.h

@@ -37,6 +37,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include "gpushare/protocol.h"
+#include "gpushare/transport.h"
 
 /* ── Logging ─────────────────────────────────────────────── */
 static int g_log_level = 1; /* 0=error, 1=info, 2=debug */
@@ -241,7 +242,8 @@ struct PendingTransfer {
 
 /* ── Per-client session ──────────────────────────────────── */
 struct ClientSession {
-    int fd;
+    std::unique_ptr<TcpTransport> transport;  /* Phase 8: owns the connection */
+    int fd;                                    /* raw fd (for accept loop compat) */
     uint32_t session_id;
     char addr_str[INET6_ADDRSTRLEN];
     time_t connected_at;
@@ -289,6 +291,7 @@ struct ClientSession {
 
     ClientSession(int fd_, uint32_t sid, const char *addr, NetType nt)
         : fd(fd_), session_id(sid), net_type(nt) {
+        transport = std::make_unique<TcpTransport>(fd_);
         strncpy(addr_str, addr, sizeof(addr_str) - 1);
         addr_str[sizeof(addr_str) - 1] = '\0';
         connected_at = time(nullptr);
@@ -298,7 +301,7 @@ struct ClientSession {
 
     ~ClientSession() {
         cleanup_resources();
-        close(fd);
+        /* Transport destructor closes the socket */
     }
 
     /* Reap completed async transfers, releasing their pinned buffers */
@@ -400,7 +403,9 @@ static void load_config(const std::string &path) {
     LOG_INFO("Loaded config from %s", path.c_str());
 }
 
-/* ── Network helpers ─────────────────────────────────────── */
+/* ── Network helpers (Phase 8: use Transport interface) ──── */
+/* These thin wrappers take ClientSession* and delegate to transport->send().
+ * The raw-fd send_all is kept only for the listen socket / accept loop. */
 static bool send_all(int fd, const void *buf, size_t len) {
     const uint8_t *p = (const uint8_t*)buf;
     while (len > 0) {
@@ -412,31 +417,36 @@ static bool send_all(int fd, const void *buf, size_t len) {
     return true;
 }
 
-static bool send_response(int fd, uint16_t opcode, uint32_t req_id,
+/* Transport-based send_all — used by all message handlers */
+static bool ts_send(ClientSession *s, const void *buf, size_t len) {
+    return s->transport->send(buf, len);
+}
+
+static bool send_response(ClientSession *s, uint16_t opcode, uint32_t req_id,
                            const void *payload, uint32_t payload_len,
                            uint16_t flags = GS_FLAG_RESPONSE) {
     uint32_t total = GPUSHARE_HEADER_SIZE + payload_len;
     gs_header_t hdr;
     gs_header_init(&hdr, opcode, req_id, total);
     hdr.flags = flags;
-    if (!send_all(fd, &hdr, sizeof(hdr))) return false;
-    if (payload_len > 0 && !send_all(fd, payload, payload_len)) return false;
+    if (!ts_send(s, &hdr, sizeof(hdr))) return false;
+    if (payload_len > 0 && !ts_send(s, payload, payload_len)) return false;
     return true;
 }
 
-static bool send_error(int fd, uint16_t opcode, uint32_t req_id, int32_t cuda_err) {
+static bool send_error(ClientSession *s, uint16_t opcode, uint32_t req_id, int32_t cuda_err) {
     gs_generic_resp_t resp;
     resp.cuda_error = cuda_err;
-    return send_response(fd, opcode, req_id, &resp, sizeof(resp),
+    return send_response(s, opcode, req_id, &resp, sizeof(resp),
                          GS_FLAG_RESPONSE | GS_FLAG_ERROR);
 }
 
-static bool send_cuda_result(int fd, uint16_t opcode, uint32_t req_id, cudaError_t err) {
+static bool send_cuda_result(ClientSession *s, uint16_t opcode, uint32_t req_id, cudaError_t err) {
     gs_generic_resp_t resp;
     resp.cuda_error = (int32_t)err;
     uint16_t flags = GS_FLAG_RESPONSE;
     if (err != cudaSuccess) flags |= GS_FLAG_ERROR;
-    return send_response(fd, opcode, req_id, &resp, sizeof(resp), flags);
+    return send_response(s, opcode, req_id, &resp, sizeof(resp), flags);
 }
 
 /* ── Message handlers ────────────────────────────────────── */
@@ -450,12 +460,12 @@ static bool handle_init(ClientSession *s, const gs_header_t *hdr, const uint8_t 
     LOG_INFO("Session %u: client connected from %s (caps=0x%x)",
              s->session_id, s->addr_str, resp.capabilities);
     s->track_op();
-    return send_response(s->fd, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
+    return send_response(s, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
 }
 
 static bool handle_ping(ClientSession *s, const gs_header_t *hdr) {
     s->track_op();
-    return send_response(s->fd, hdr->opcode, hdr->req_id, nullptr, 0);
+    return send_response(s, hdr->opcode, hdr->req_id, nullptr, 0);
 }
 
 static bool handle_get_device_count(ClientSession *s, const gs_header_t *hdr) {
@@ -464,14 +474,14 @@ static bool handle_get_device_count(ClientSession *s, const gs_header_t *hdr) {
     gs_device_count_resp_t resp;
     resp.count = count;
     s->track_op(0, sizeof(resp));
-    return send_response(s->fd, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
+    return send_response(s, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
 }
 
 static bool handle_get_device_props(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
     auto *req = (const gs_device_props_req_t*)payload;
     cudaDeviceProp props;
     cudaError_t err = cudaGetDeviceProperties(&props, req->device);
-    if (err != cudaSuccess) return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    if (err != cudaSuccess) return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
 
     gs_device_props_t resp;
     memset(&resp, 0, sizeof(resp));
@@ -496,14 +506,14 @@ static bool handle_get_device_props(ClientSession *s, const gs_header_t *hdr, co
     resp.mem_bus_width        = props.memoryBusWidth;
     resp.l2_cache_size        = props.l2CacheSize;
     s->track_op(sizeof(*req), sizeof(resp));
-    return send_response(s->fd, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
+    return send_response(s, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
 }
 
 static bool handle_set_device(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
     auto *req = (const gs_set_device_req_t*)payload;
     cudaError_t err = cudaSetDevice(req->device);
     s->track_op();
-    return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
 }
 
 static bool handle_malloc(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -521,7 +531,7 @@ static bool handle_malloc(ClientSession *s, const gs_header_t *hdr, const uint8_
         s->mem_allocated += req->size;
     }
     s->track_op();
-    return send_response(s->fd, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
+    return send_response(s, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
 }
 
 static bool handle_free(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -536,7 +546,7 @@ static bool handle_free(ClientSession *s, const gs_header_t *hdr, const uint8_t 
     }
     s->allocated_ptrs.erase(ptr);
     s->track_op();
-    return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
 }
 
 static bool handle_memcpy_h2d(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -545,7 +555,7 @@ static bool handle_memcpy_h2d(ClientSession *s, const gs_header_t *hdr, const ui
     const void *src = payload + sizeof(gs_memcpy_h2d_req_t);
     cudaError_t err = cudaMemcpy(dst, src, req->size, cudaMemcpyHostToDevice);
     s->track_op(req->size, 0);
-    return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
 }
 
 static bool handle_memcpy_d2h(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -562,12 +572,12 @@ static bool handle_memcpy_d2h(ClientSession *s, const gs_header_t *hdr, const ui
         host_buf = malloc(req->size);
     }
 
-    if (!host_buf) return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
+    if (!host_buf) return send_cuda_result(s, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
 
     cudaError_t err = cudaMemcpy(host_buf, src, req->size, cudaMemcpyDeviceToHost);
     if (err != cudaSuccess) {
         s->pinned_pool.release(host_buf, pool_idx);
-        return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+        return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
     }
 
     uint32_t payload_len = sizeof(int32_t) + req->size;
@@ -577,9 +587,9 @@ static bool handle_memcpy_d2h(ClientSession *s, const gs_header_t *hdr, const ui
     resp_hdr.flags = GS_FLAG_RESPONSE;
 
     int32_t cuda_err = 0;
-    bool ok = send_all(s->fd, &resp_hdr, sizeof(resp_hdr))
-           && send_all(s->fd, &cuda_err, sizeof(cuda_err))
-           && send_all(s->fd, host_buf, req->size);
+    bool ok = ts_send(s, &resp_hdr, sizeof(resp_hdr))
+           && ts_send(s, &cuda_err, sizeof(cuda_err))
+           && ts_send(s, host_buf, req->size);
 
     s->pinned_pool.release(host_buf, pool_idx);
     if (!ok) return false;
@@ -601,14 +611,14 @@ static bool handle_memcpy_h2d_async(ClientSession *s, const gs_header_t *hdr, co
     /* Copy network data into pinned buffer for async DMA */
     int pool_idx = -1;
     void *pinned_buf = s->pinned_pool.acquire(req->size, pool_idx);
-    if (!pinned_buf) return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
+    if (!pinned_buf) return send_cuda_result(s, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
 
     memcpy(pinned_buf, src_data, req->size);
 
     cudaError_t err = cudaMemcpyAsync(dst, pinned_buf, req->size, cudaMemcpyHostToDevice, stream);
     if (err != cudaSuccess) {
         s->pinned_pool.release(pinned_buf, pool_idx);
-        return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+        return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
     }
 
     /* Track buffer release via event — buffer freed when GPU finishes */
@@ -616,14 +626,14 @@ static bool handle_memcpy_h2d_async(ClientSession *s, const gs_header_t *hdr, co
     cudaError_t ev_err = cudaEventCreate(&ev);
     if (ev_err != cudaSuccess) {
         s->pinned_pool.release(pinned_buf, pool_idx);
-        return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, ev_err);
+        return send_cuda_result(s, hdr->opcode, hdr->req_id, ev_err);
     }
     cudaEventRecord(ev, stream);
     s->pending_transfers.push_back({pinned_buf, pool_idx, ev});
 
     /* Send success immediately (before GPU completes) */
     s->track_op(req->size, 0);
-    return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaSuccess);
+    return send_cuda_result(s, hdr->opcode, hdr->req_id, cudaSuccess);
 }
 
 static bool handle_memcpy_d2h_async(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -642,7 +652,7 @@ static bool handle_memcpy_d2h_async(ClientSession *s, const gs_header_t *hdr, co
     } else {
         host_buf = malloc(req->size);
     }
-    if (!host_buf) return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
+    if (!host_buf) return send_cuda_result(s, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
 
     /* Use the stream for the copy, then synchronize to get data */
     cudaError_t err = cudaMemcpyAsync(host_buf, src, req->size, cudaMemcpyDeviceToHost, stream);
@@ -650,7 +660,7 @@ static bool handle_memcpy_d2h_async(ClientSession *s, const gs_header_t *hdr, co
 
     if (err != cudaSuccess) {
         s->pinned_pool.release(host_buf, pool_idx);
-        return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+        return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
     }
 
     uint32_t payload_len = sizeof(int32_t) + req->size;
@@ -660,9 +670,9 @@ static bool handle_memcpy_d2h_async(ClientSession *s, const gs_header_t *hdr, co
     resp_hdr.flags = GS_FLAG_RESPONSE;
 
     int32_t cuda_err = 0;
-    bool ok = send_all(s->fd, &resp_hdr, sizeof(resp_hdr))
-           && send_all(s->fd, &cuda_err, sizeof(cuda_err))
-           && send_all(s->fd, host_buf, req->size);
+    bool ok = ts_send(s, &resp_hdr, sizeof(resp_hdr))
+           && ts_send(s, &cuda_err, sizeof(cuda_err))
+           && ts_send(s, host_buf, req->size);
 
     s->pinned_pool.release(host_buf, pool_idx);
     if (!ok) return false;
@@ -683,14 +693,14 @@ static bool handle_memcpy_h2d_chunked(ClientSession *s, const gs_header_t *hdr, 
     /* Copy chunk data into pinned buffer and async DMA to device */
     int pool_idx = -1;
     void *pinned_buf = s->pinned_pool.acquire(chunk->chunk_size, pool_idx);
-    if (!pinned_buf) return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
+    if (!pinned_buf) return send_cuda_result(s, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
 
     memcpy(pinned_buf, src_data, chunk->chunk_size);
 
     cudaError_t err = cudaMemcpyAsync(dst, pinned_buf, chunk->chunk_size, cudaMemcpyHostToDevice, stream);
     if (err != cudaSuccess) {
         s->pinned_pool.release(pinned_buf, pool_idx);
-        return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+        return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
     }
 
     /* Track for deferred release */
@@ -698,7 +708,7 @@ static bool handle_memcpy_h2d_chunked(ClientSession *s, const gs_header_t *hdr, 
     cudaError_t ev_err = cudaEventCreate(&ev);
     if (ev_err != cudaSuccess) {
         s->pinned_pool.release(pinned_buf, pool_idx);
-        return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, ev_err);
+        return send_cuda_result(s, hdr->opcode, hdr->req_id, ev_err);
     }
     cudaEventRecord(ev, stream);
     s->pending_transfers.push_back({pinned_buf, pool_idx, ev});
@@ -708,7 +718,7 @@ static bool handle_memcpy_h2d_chunked(ClientSession *s, const gs_header_t *hdr, 
     LOG_DBG("Session %u: H2D chunk offset=%lu size=%u (total=%lu)",
             s->session_id, (unsigned long)chunk->chunk_offset,
             chunk->chunk_size, (unsigned long)chunk->total_size);
-    return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaSuccess);
+    return send_cuda_result(s, hdr->opcode, hdr->req_id, cudaSuccess);
 }
 
 /* Phase 6: Per-chunk D2H with speculative prefetch.
@@ -749,14 +759,14 @@ static bool handle_memcpy_d2h_chunked(ClientSession *s, const gs_header_t *hdr, 
         }
         /* Copy this chunk synchronously */
         send_buf = s->pinned_pool.acquire(csize, send_idx);
-        if (!send_buf) return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
+        if (!send_buf) return send_cuda_result(s, hdr->opcode, hdr->req_id, cudaErrorMemoryAllocation);
 
         void *src = (void*)(uintptr_t)(dev_base + cur_offset);
         cudaError_t err = cudaMemcpyAsync(send_buf, src, csize, cudaMemcpyDeviceToHost, stream);
         if (err == cudaSuccess) err = cudaStreamSynchronize(stream);
         if (err != cudaSuccess) {
             s->pinned_pool.release(send_buf, send_idx);
-            return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+            return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
         }
     }
 
@@ -796,9 +806,9 @@ static bool handle_memcpy_d2h_chunked(ClientSession *s, const gs_header_t *hdr, 
         resp_hdr.flags |= GS_FLAG_LAST_CHUNK;
 
     int32_t cuda_err = 0;
-    bool ok = send_all(s->fd, &resp_hdr, sizeof(resp_hdr))
-           && send_all(s->fd, &cuda_err, sizeof(cuda_err))
-           && send_all(s->fd, send_buf, csize);
+    bool ok = ts_send(s, &resp_hdr, sizeof(resp_hdr))
+           && ts_send(s, &cuda_err, sizeof(cuda_err))
+           && ts_send(s, send_buf, csize);
 
     s->pinned_pool.release(send_buf, send_idx);
     if (!ok) return false;
@@ -812,7 +822,7 @@ static bool handle_memcpy_d2d(ClientSession *s, const gs_header_t *hdr, const ui
     void *src = (void*)(uintptr_t)req->src_ptr;
     cudaError_t err = cudaMemcpy(dst, src, req->size, cudaMemcpyDeviceToDevice);
     s->track_op();
-    return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
 }
 
 static bool handle_memset(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -820,7 +830,7 @@ static bool handle_memset(ClientSession *s, const gs_header_t *hdr, const uint8_
     void *ptr = (void*)(uintptr_t)req->device_ptr;
     cudaError_t err = cudaMemset(ptr, req->value, req->size);
     s->track_op();
-    return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
 }
 
 static bool handle_module_load(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -843,7 +853,7 @@ static bool handle_module_load(ClientSession *s, const gs_header_t *hdr, const u
         s->loaded_modules.insert(mod);
     }
     s->track_op(req->data_size, 0);
-    return send_response(s->fd, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
+    return send_response(s, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
 }
 
 static bool handle_module_unload(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -855,7 +865,7 @@ static bool handle_module_unload(ClientSession *s, const gs_header_t *hdr, const
     gs_generic_resp_t resp;
     resp.cuda_error = (int32_t)err;
     s->track_op();
-    return send_response(s->fd, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
+    return send_response(s, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
 }
 
 static bool handle_get_function(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -868,7 +878,7 @@ static bool handle_get_function(ClientSession *s, const gs_header_t *hdr, const 
     resp.func_handle = (uint64_t)(uintptr_t)func;
     resp.cuda_error = (int32_t)err;
     s->track_op();
-    return send_response(s->fd, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
+    return send_response(s, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
 }
 
 static bool handle_launch_kernel(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -905,13 +915,13 @@ static bool handle_launch_kernel(ClientSession *s, const gs_header_t *hdr, const
     gs_generic_resp_t resp;
     resp.cuda_error = (int32_t)err;
     s->track_op(req->args_size, 0);
-    return send_response(s->fd, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
+    return send_response(s, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
 }
 
 static bool handle_device_sync(ClientSession *s, const gs_header_t *hdr) {
     cudaError_t err = cudaDeviceSynchronize();
     s->track_op();
-    return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
 }
 
 static bool handle_stream_create(ClientSession *s, const gs_header_t *hdr) {
@@ -921,7 +931,7 @@ static bool handle_stream_create(ClientSession *s, const gs_header_t *hdr) {
     resp.stream_handle = (uint64_t)(uintptr_t)stream;
     if (err == cudaSuccess) s->created_streams.insert(stream);
     s->track_op();
-    return send_response(s->fd, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
+    return send_response(s, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
 }
 
 static bool handle_stream_destroy(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -930,7 +940,7 @@ static bool handle_stream_destroy(ClientSession *s, const gs_header_t *hdr, cons
     cudaError_t err = cudaStreamDestroy(stream);
     s->created_streams.erase(stream);
     s->track_op();
-    return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
 }
 
 static bool handle_stream_sync(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -938,7 +948,7 @@ static bool handle_stream_sync(ClientSession *s, const gs_header_t *hdr, const u
     cudaStream_t stream = (cudaStream_t)(uintptr_t)req->stream_handle;
     cudaError_t err = cudaStreamSynchronize(stream);
     s->track_op();
-    return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
 }
 
 static bool handle_event_create(ClientSession *s, const gs_header_t *hdr) {
@@ -948,7 +958,7 @@ static bool handle_event_create(ClientSession *s, const gs_header_t *hdr) {
     resp.event_handle = (uint64_t)(uintptr_t)event;
     if (err == cudaSuccess) s->created_events.insert(event);
     s->track_op();
-    return send_response(s->fd, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
+    return send_response(s, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
 }
 
 static bool handle_event_destroy(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -958,7 +968,7 @@ static bool handle_event_destroy(ClientSession *s, const gs_header_t *hdr, const
     cudaError_t err = cudaEventDestroy(event);
     s->created_events.erase(event);
     s->track_op();
-    return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
 }
 
 static bool handle_event_record(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -967,7 +977,7 @@ static bool handle_event_record(ClientSession *s, const gs_header_t *hdr, const 
     cudaStream_t stream = (cudaStream_t)(uintptr_t)req->stream_handle;
     cudaError_t err = cudaEventRecord(event, stream);
     s->track_op();
-    return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
 }
 
 static bool handle_event_sync(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -976,7 +986,7 @@ static bool handle_event_sync(ClientSession *s, const gs_header_t *hdr, const ui
     cudaEvent_t event = (cudaEvent_t)(uintptr_t)handle;
     cudaError_t err = cudaEventSynchronize(event);
     s->track_op();
-    return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
 }
 
 static bool handle_event_elapsed(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -985,11 +995,11 @@ static bool handle_event_elapsed(ClientSession *s, const gs_header_t *hdr, const
     cudaEvent_t end   = (cudaEvent_t)(uintptr_t)req->end_event;
     float ms = 0;
     cudaError_t err = cudaEventElapsedTime(&ms, start, end);
-    if (err != cudaSuccess) return send_cuda_result(s->fd, hdr->opcode, hdr->req_id, err);
+    if (err != cudaSuccess) return send_cuda_result(s, hdr->opcode, hdr->req_id, err);
     gs_event_elapsed_resp_t resp;
     resp.milliseconds = ms;
     s->track_op();
-    return send_response(s->fd, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
+    return send_response(s, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
 }
 
 static bool handle_register_fatbin(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
@@ -1008,14 +1018,14 @@ static bool handle_register_fatbin(ClientSession *s, const gs_header_t *hdr, con
     gs_register_fatbin_resp_t resp;
     resp.fatbin_handle = handle;
     s->track_op(req->data_size, 0);
-    return send_response(s->fd, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
+    return send_response(s, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
 }
 
 static bool handle_register_function(ClientSession *s, const gs_header_t *hdr, const uint8_t *payload) {
     auto *req = (const gs_register_function_req_t*)payload;
     auto it = s->fatbin_map.find(req->fatbin_handle);
     if (it == s->fatbin_map.end()) {
-        return send_error(s->fd, hdr->opcode, hdr->req_id, CUDA_ERROR_NOT_FOUND);
+        return send_error(s, hdr->opcode, hdr->req_id, CUDA_ERROR_NOT_FOUND);
     }
 
     CUfunction func = nullptr;
@@ -1027,7 +1037,7 @@ static bool handle_register_function(ClientSession *s, const gs_header_t *hdr, c
     gs_generic_resp_t resp;
     resp.cuda_error = (int32_t)err;
     s->track_op();
-    return send_response(s->fd, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
+    return send_response(s, hdr->opcode, hdr->req_id, &resp, sizeof(resp));
 }
 
 /* ── Live GPU status handler ──────────────────────────────── */
@@ -1071,7 +1081,7 @@ static bool handle_get_gpu_status(ClientSession *s, const gs_header_t *hdr) {
     }
 
     s->track_op(0, sizeof(status));
-    return send_response(s->fd, hdr->opcode, hdr->req_id, &status, sizeof(status));
+    return send_response(s, hdr->opcode, hdr->req_id, &status, sizeof(status));
 }
 
 /* ── Stats handler ───────────────────────────────────────── */
@@ -1120,7 +1130,7 @@ static bool handle_get_stats(ClientSession *s, const gs_header_t *hdr) {
         idx++;
     }
 
-    return send_response(s->fd, hdr->opcode, hdr->req_id, payload.data(), payload_len);
+    return send_response(s, hdr->opcode, hdr->req_id, payload.data(), payload_len);
 }
 
 /* ── Generic library call (cuBLAS, cuDNN, etc.) ──────────── */
@@ -1132,10 +1142,10 @@ static bool handle_lib_call(ClientSession *s, const gs_header_t *hdr,
                             const uint8_t *payload, uint32_t payload_len) {
     std::vector<uint8_t> response;
     if (!dispatch_lib_call(payload, payload_len, response)) {
-        return send_error(s->fd, hdr->opcode, hdr->req_id, -1);
+        return send_error(s, hdr->opcode, hdr->req_id, -1);
     }
     s->track_op(payload_len, response.size());
-    return send_response(s->fd, hdr->opcode, hdr->req_id,
+    return send_response(s, hdr->opcode, hdr->req_id,
                          response.data(), response.size());
 }
 
@@ -1193,7 +1203,7 @@ static bool handle_message(ClientSession *s, const uint8_t *msg, uint32_t len) {
         case GS_OP_LIB_CALL:        return handle_lib_call(s, hdr, payload, len - GPUSHARE_HEADER_SIZE);
         default:
             LOG_WARN("Session %u: unknown opcode 0x%04x", s->session_id, hdr->opcode);
-            return send_error(s->fd, hdr->opcode, hdr->req_id, -1);
+            return send_error(s, hdr->opcode, hdr->req_id, -1);
     }
 }
 
@@ -1228,37 +1238,16 @@ static void *client_thread(void *arg) {
     /* Ensure CUDA context is current on this thread */
     cudaSetDevice(g_device);
 
-    /* Per-client TCP tuning based on network type */
-    int flag = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
-
-    int bufsize;
-    int recv_chunk;
-    if (net == NET_LAN) {
-        /* LAN: maximize throughput — full 1 Gbps over switch
-         * Large buffers + TCP_QUICKACK = saturate the link.
-         * Traffic stays on the switch, never touches internet gateway. */
-        bufsize = 8 * 1024 * 1024;   /* 8 MB — fills 1GbE pipe */
-        recv_chunk = 256 * 1024;      /* 256 KB recv buffer */
-#ifdef TCP_QUICKACK
-        setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &flag, sizeof(flag));
-#endif
-    } else {
-        /* WAN/WiFi: conservative buffers — avoid bloating slow links.
-         * Still fast, but won't overwhelm WiFi or internet connections. */
-        bufsize = 2 * 1024 * 1024;   /* 2 MB */
-        recv_chunk = 64 * 1024;       /* 64 KB recv buffer */
-    }
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+    /* Phase 8: Per-client TCP tuning via transport interface */
+    s->transport->optimize(net == NET_LAN);
+    int recv_chunk = (net == NET_LAN) ? 256 * 1024 : 64 * 1024;
 
     std::vector<uint8_t> buf(recv_chunk);
     std::vector<uint8_t> msg_buf;
     size_t msg_offset = 0;
 
     while (g_running) {
-        ssize_t n = recv(fd, buf.data(), buf.size(), 0);
+        ssize_t n = s->transport->recv_some(buf.data(), buf.size());
         if (n <= 0) break;
 
         msg_buf.insert(msg_buf.end(), buf.data(), buf.data() + n);

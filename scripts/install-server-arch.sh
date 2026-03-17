@@ -344,7 +344,7 @@ echo -e "  Dashboard:        ${CYAN}http://${LOCAL_IP}:${DASHBOARD_PORT}${NC}"
 echo -e "  Config:           $INSTALL_CONF/server.conf"
 echo -e "  GPU:              $gpu_name"
 echo -e "  API coverage:    2600+ functions (cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSOLVER, cuRAND, NVRTC, nvJPEG)"
-echo -e "  Transfer opts:   ${GREEN}ACTIVE${NC} (tiered pinned pools, async memcpy, chunked pipelining, D2H prefetch)"
+echo -e "  Transfer opts:   ${GREEN}ACTIVE${NC} (tiered pinned pools, async memcpy, chunked pipelining, D2H prefetch, modular transport)"
 echo
 echo -e "  ${BOLD}Client setup:${NC}"
 echo -e "    On client machines, set server=${CYAN}${LOCAL_IP}:${SERVER_PORT}${NC}"

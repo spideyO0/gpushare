@@ -71,6 +71,7 @@
 
 #include "gpushare/protocol.h"
 #include "gpushare/cuda_defs.h"
+#include "gpushare/transport.h"
 
 /* Platform-specific dynamic loading for local GPU passthrough */
 #ifndef _WIN32
@@ -426,6 +427,7 @@ static int g_verbose = 0;
 
 /* ── Connection state ────────────────────────────────────── */
 static sock_t       g_sock = SOCK_INVALID;
+static std::unique_ptr<TcpTransport> g_transport;  /* Phase 8: transport abstraction */
 static std::mutex   g_send_mtx;     /* Phase 4: protects send() calls only */
 static std::atomic<uint32_t> g_req_id{1};
 static std::string  g_server_host = "localhost";
@@ -451,12 +453,11 @@ static std::thread  g_recv_thread;
 static std::atomic<bool> g_recv_running{false};
 
 static void recv_thread_func() {
-    /* Capture socket fd at thread start — g_sock is guaranteed to be valid
-     * because start_recv_thread is called after successful connect/init. */
-    sock_t sock = g_sock;
+    /* Phase 8: capture transport pointer at thread start */
+    Transport *tp = g_transport.get();
     while (g_recv_running.load()) {
         gs_header_t resp_hdr;
-        if (!recv_all(sock, &resp_hdr, sizeof(resp_hdr))) {
+        if (!tp->recv(&resp_hdr, sizeof(resp_hdr))) {
             /* Connection lost — fulfill all pending with error */
             std::lock_guard<std::mutex> lock(g_pending_mtx);
             for (auto &kv : g_pending) {
@@ -471,7 +472,7 @@ static void recv_thread_func() {
 
         uint32_t pl = resp_hdr.length - GPUSHARE_HEADER_SIZE;
         std::vector<uint8_t> payload(pl);
-        if (pl > 0 && !recv_all(sock, payload.data(), pl)) {
+        if (pl > 0 && !tp->recv(payload.data(), pl)) {
             std::lock_guard<std::mutex> lock(g_pending_mtx);
             for (auto &kv : g_pending) {
                 std::vector<uint8_t> empty;
@@ -508,14 +509,8 @@ static void start_recv_thread() {
 static void stop_recv_thread() {
     if (!g_recv_running.load()) return;
     g_recv_running = false;
-    /* Unblock recv_all by shutting down the read side */
-    if (g_sock != SOCK_INVALID) {
-#ifdef _WIN32
-        shutdown(g_sock, SD_RECEIVE);
-#else
-        shutdown(g_sock, SHUT_RD);
-#endif
-    }
+    /* Unblock recv by shutting down the read side of the transport */
+    if (g_transport) g_transport->shutdown_read();
     if (g_recv_thread.joinable()) g_recv_thread.join();
 }
 
@@ -634,7 +629,7 @@ static void load_config() {
 }
 
 static bool ensure_connected() {
-    if (g_sock != SOCK_INVALID) return true;
+    if (g_transport && g_transport->is_valid()) return true;
 
     load_config();
 
@@ -642,77 +637,46 @@ static bool ensure_connected() {
 
     TRACE("Connecting to %s:%d", g_server_host.c_str(), g_server_port);
 
-    struct addrinfo hints = {}, *res = nullptr;
-    hints.ai_family   = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    char port_str[16];
-    snprintf(port_str, sizeof(port_str), "%d", g_server_port);
-
-    int rc = getaddrinfo(g_server_host.c_str(), port_str, &hints, &res);
-    if (rc != 0) {
-        ERR("DNS resolution failed for %s: %s", g_server_host.c_str(), gai_strerror(rc));
-        return false;
-    }
-
-    g_sock = SOCK_INVALID;
-    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        sock_t s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (s == SOCK_INVALID) continue;
-        if (connect(s, ai->ai_addr, ai->ai_addrlen) == 0) {
-            g_sock = s;
-            break;
-        }
-        sock_close(s);
-    }
-    freeaddrinfo(res);
-
-    if (g_sock == SOCK_INVALID) {
+    /* Phase 8: Use TcpTransport for connection */
+    auto tcp = std::make_unique<TcpTransport>();
+    if (!tcp->connect(g_server_host.c_str(), g_server_port)) {
         ERR("Cannot connect to gpushare server at %s:%d", g_server_host.c_str(), g_server_port);
         return false;
     }
+    tcp->optimize(true);  /* LAN settings by default */
+    g_sock = tcp->raw_fd();  /* keep g_sock for backward compat */
+    g_transport = std::move(tcp);
 
-    /* LAN-optimized TCP — maximize throughput on 1GbE, minimize latency */
-    int flag = 1;
-    setsockopt(g_sock, IPPROTO_TCP, TCP_NODELAY, (const char*)&flag, sizeof(flag));
-#if !defined(_WIN32) && defined(TCP_QUICKACK)
-    setsockopt(g_sock, IPPROTO_TCP, TCP_QUICKACK, (const char*)&flag, sizeof(flag));
-#endif
-    /* 8 MB buffers — saturate 1GbE without stalling on large transfers */
-    int bufsize = 8 * 1024 * 1024;
-    setsockopt(g_sock, SOL_SOCKET, SO_SNDBUF, (const char*)&bufsize, sizeof(bufsize));
-    setsockopt(g_sock, SOL_SOCKET, SO_RCVBUF, (const char*)&bufsize, sizeof(bufsize));
-    /* Keep-alive for connection health */
-    setsockopt(g_sock, SOL_SOCKET, SO_KEEPALIVE, (const char*)&flag, sizeof(flag));
-
-    /* Send init — done before recv thread starts, so we read directly here */
+    /* Send init — done before recv thread starts, so we use transport directly */
     gs_header_t hdr;
     gs_init_req_t req;
     gs_header_init(&hdr, GS_OP_INIT, g_req_id++, GPUSHARE_HEADER_SIZE + sizeof(req));
     req.version     = GPUSHARE_VERSION;
     req.client_type = 0;
-    if (!send_all(g_sock, &hdr, sizeof(hdr)) || !send_all(g_sock, &req, sizeof(req))) {
+    if (!g_transport->send(&hdr, sizeof(hdr)) || !g_transport->send(&req, sizeof(req))) {
         ERR("Failed to send init");
-        sock_close(g_sock);
+        g_transport->close();
+        g_transport.reset();
         g_sock = SOCK_INVALID;
         return false;
     }
 
     /* Read init response (before recv thread exists) */
     gs_header_t resp_hdr;
-    if (!recv_all(g_sock, &resp_hdr, sizeof(resp_hdr))) {
+    if (!g_transport->recv(&resp_hdr, sizeof(resp_hdr))) {
         ERR("Failed to read init response");
-        sock_close(g_sock);
+        g_transport->close();
+        g_transport.reset();
         g_sock = SOCK_INVALID;
         return false;
     }
 
     uint32_t resp_pl = resp_hdr.length - GPUSHARE_HEADER_SIZE;
-    /* Read full payload (may be 12 bytes for old server, 16 for new) */
     std::vector<uint8_t> resp_buf(resp_pl);
-    if (resp_pl > 0 && !recv_all(g_sock, resp_buf.data(), resp_pl)) {
+    if (resp_pl > 0 && !g_transport->recv(resp_buf.data(), resp_pl)) {
         ERR("Failed to read init payload");
-        sock_close(g_sock);
+        g_transport->close();
+        g_transport.reset();
         g_sock = SOCK_INVALID;
         return false;
     }
@@ -765,8 +729,8 @@ bool rpc_call(uint16_t opcode, const void *req_payload, uint32_t req_len,
         gs_header_init(&hdr, opcode, rid, GPUSHARE_HEADER_SIZE + req_len);
 
         std::lock_guard<std::mutex> lock(g_send_mtx);
-        if (!send_all(g_sock, &hdr, sizeof(hdr)) ||
-            (req_len > 0 && !send_all(g_sock, req_payload, req_len))) {
+        if (!g_transport->send(&hdr, sizeof(hdr)) ||
+            (req_len > 0 && !g_transport->send(req_payload, req_len))) {
             std::lock_guard<std::mutex> plock(g_pending_mtx);
             g_pending.erase(rid);
             ERR("RPC send failed (opcode=0x%04x)", opcode);
@@ -808,8 +772,8 @@ static bool rpc_call_flags(uint16_t opcode, uint16_t flags, const void *req_payl
         hdr.flags = flags;
 
         std::lock_guard<std::mutex> lock(g_send_mtx);
-        if (!send_all(g_sock, &hdr, sizeof(hdr)) ||
-            (req_len > 0 && !send_all(g_sock, req_payload, req_len))) {
+        if (!g_transport->send(&hdr, sizeof(hdr)) ||
+            (req_len > 0 && !g_transport->send(req_payload, req_len))) {
             std::lock_guard<std::mutex> plock(g_pending_mtx);
             g_pending.erase(rid);
             ERR("RPC send failed (opcode=0x%04x, flags=0x%04x)", opcode, flags);
@@ -2103,17 +2067,18 @@ GPUSHARE_EXPORT const char* nvmlErrorString(nvmlReturn_t result) {
 /* ── Cleanup ─────────────────────────────────────────────── */
 
 static void GPUSHARE_DESTRUCTOR gpushare_cleanup(void) {
-    if (g_sock != SOCK_INVALID) {
+    if (g_transport) {
         /* Send close message before tearing down */
         {
             std::lock_guard<std::mutex> lock(g_send_mtx);
             gs_header_t hdr;
             gs_header_init(&hdr, GS_OP_CLOSE, 0, GPUSHARE_HEADER_SIZE);
-            send_all(g_sock, &hdr, sizeof(hdr));
+            g_transport->send(&hdr, sizeof(hdr));
         }
         /* Stop recv thread (will unblock via shutdown) */
         stop_recv_thread();
-        sock_close(g_sock);
+        g_transport->close();
+        g_transport.reset();
         g_sock = SOCK_INVALID;
         TRACE("Disconnected from server");
     }
@@ -2149,13 +2114,13 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     if (fdwReason == DLL_PROCESS_DETACH) {
         /* Signal recv thread to stop */
         g_recv_running = false;
-        if (g_sock != SOCK_INVALID) {
+        if (g_transport) {
             /* Send close message best-effort */
             gs_header_t hdr;
             gs_header_init(&hdr, GS_OP_CLOSE, 0, GPUSHARE_HEADER_SIZE);
-            send_all(g_sock, &hdr, sizeof(hdr));
+            g_transport->send(&hdr, sizeof(hdr));
             /* Unblock recv thread */
-            shutdown(g_sock, SD_RECEIVE);
+            g_transport->shutdown_read();
         }
         if (lpvReserved == NULL) {
             /* Dynamic unload (FreeLibrary) — safe to join */
@@ -2165,10 +2130,11 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
              * Detach and let the OS tear down the thread. */
             if (g_recv_thread.joinable()) g_recv_thread.detach();
         }
-        if (g_sock != SOCK_INVALID) {
-            closesocket(g_sock);
-            g_sock = SOCK_INVALID;
+        if (g_transport) {
+            g_transport->close();
+            g_transport.reset();
         }
+        g_sock = SOCK_INVALID;
         {
             std::lock_guard<std::mutex> lock(g_pending_mtx);
             g_pending.clear();
