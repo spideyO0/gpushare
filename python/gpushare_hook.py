@@ -128,8 +128,8 @@ def _load_cuda_lib():
     return None
 
 
-def _query_devices_ctypes():
-    """Discover GPUs via ctypes calls to the loaded CUDA library."""
+def _query_devices_ctypes_inner():
+    """Inner function that does the actual ctypes GPU discovery."""
     global _devices, _device_count
 
     lib = _load_cuda_lib()
@@ -208,6 +208,20 @@ def _query_devices_ctypes():
             'sm_count': sm_count.value,
             'is_remote': '(remote)' in raw_name,
         })
+
+
+def _query_devices_ctypes():
+    """Discover GPUs via ctypes with a timeout.
+
+    Our DLL's cuInit() connects to the gpushare server, which can block
+    indefinitely if the server is unreachable. Run in a thread with timeout
+    so Python startup is never blocked.
+    """
+    t = threading.Thread(target=_query_devices_ctypes_inner, daemon=True)
+    t.start()
+    t.join(timeout=5)  # 5 second max wait
+    if t.is_alive():
+        sys.stderr.write("[gpushare] GPU discovery timed out (server unreachable?)\n")
 
 
 # ════════════════════════════════════════════════════════════
