@@ -384,6 +384,36 @@ if ($Compiler -eq "prebuilt" -and $NeedDownload) {
         }
     }
 
+    # -- Pre-build fixups for upgrades ------------------------------------
+    # Remove weak stubs that conflict with strong implementations on MinGW.
+    # MinGW does not support weak symbol override like GCC on Linux, so
+    # functions with both a weak stub and a strong definition cause
+    # "multiple definition" linker errors.
+    $allStubs = Join-Path $ProjectDir "client\generated_all_stubs.cpp"
+    if (Test-Path $allStubs) {
+        $stubContent = Get-Content $allStubs -Raw
+        $changed = $false
+        # cuGetProcAddress / _v2 are implemented in gpushare_client.cpp
+        foreach ($funcName in @("cuGetProcAddress\(\)", "cuGetProcAddress_v2\(\)")) {
+            $pattern = "(?m)^STUB_EXPORT int WEAK_SYM $funcName \{ return 0; \}\r?\n"
+            if ($stubContent -match $pattern) {
+                $stubContent = $stubContent -replace $pattern, ""
+                $changed = $true
+            }
+        }
+        if ($changed) {
+            Set-Content -Path $allStubs -Value $stubContent -NoNewline
+            Write-Info "Removed conflicting weak stubs from generated_all_stubs.cpp (MinGW compat)"
+        }
+    }
+
+    # Clean build if upgrading and force was requested (ensures fresh compile)
+    if ($Force -and (Test-Path (Join-Path $BuildDir "CMakeCache.txt"))) {
+        Write-Info "Force rebuild: cleaning build directory"
+        Remove-Item -Recurse -Force $BuildDir
+        New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+    }
+
     # -- Configure --------------------------------------------------------
     $cmakeArgs = @(
         "-S", $ProjectDir,

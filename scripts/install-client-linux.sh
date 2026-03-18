@@ -429,6 +429,25 @@ if [[ "$SKIP_BUILD" == false ]]; then
             mkdir -p "$BUILD_DIR"
         fi
     fi
+    # Remove weak stubs that conflict with strong implementations.
+    # On some toolchains (MinGW, older GCC), weak symbol override doesn't work
+    # and causes "multiple definition" linker errors.
+    local all_stubs="$PROJECT_DIR/client/generated_all_stubs.cpp"
+    if [[ -f "$all_stubs" ]]; then
+        if grep -q 'WEAK_SYM cuGetProcAddress()' "$all_stubs" 2>/dev/null; then
+            sed -i '/STUB_EXPORT int WEAK_SYM cuGetProcAddress() /d' "$all_stubs"
+            sed -i '/STUB_EXPORT int WEAK_SYM cuGetProcAddress_v2() /d' "$all_stubs"
+            info "Removed conflicting weak stubs from generated_all_stubs.cpp"
+        fi
+    fi
+
+    # Force clean build on upgrade to pick up all source changes
+    if [[ "$FORCE_REINSTALL" == true ]] && [[ -f "$BUILD_DIR/CMakeCache.txt" ]]; then
+        info "Force rebuild: cleaning build directory"
+        rm -rf "$BUILD_DIR"
+        mkdir -p "$BUILD_DIR"
+    fi
+
     cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SERVER=OFF \
