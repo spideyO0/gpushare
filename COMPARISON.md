@@ -53,8 +53,9 @@ Both projects share the same goal: make a remote NVIDIA GPU accessible over the 
 | Linux distro detection | None | 9 package managers auto-detected |
 | macOS (native) | No (Docker only) | Native dylib symlinks |
 | macOS (SIP handling) | N/A | Quarantine clearing, full-path shebangs |
-| Windows | No | DLL copies + registry + tray widget + PyTorch hook for dual-GPU |
+| Windows | No | DLL copies + registry + tray widget + PyTorch hook + Remote Priority Mode |
 | Python venvs | Broken (LD_PRELOAD per-session) | Works (libcuda.so.1 from system) |
+| Device Prioritization | No | Yes (Remote GPU as Device 0 via `remote_first`) |
 
 ### SCUDA on Linux
 ```bash
@@ -282,8 +283,9 @@ This 10% gap is closable — adding a function to gpushare's codegen is one line
 | 48 | Request pipelining (concurrent RPCs) | No | Yes |
 | 49 | Capability negotiation (backward-compat) | No | Yes |
 | 50 | PyTorch startup hook (dual-GPU) | No | Yes |
+| 51 | Remote Priority (Remote=Device 0) | No | Yes |
 
-**SCUDA: 5/50 features. gpushare: 50/50 features.**
+**SCUDA: 5/51 features. gpushare: 51/51 features.**
 
 ---
 

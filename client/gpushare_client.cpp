@@ -131,6 +131,7 @@ typedef nvmlReturn_t (*pfn_nvmlDeviceGetUUID)(nvmlDevice_t, char*, unsigned int)
 typedef nvmlReturn_t (*pfn_nvmlDeviceGetPciInfo_v3)(nvmlDevice_t, nvmlPciInfo_t*);
 typedef nvmlReturn_t (*pfn_nvmlDeviceGetCudaComputeCapability)(nvmlDevice_t, int*, int*);
 typedef nvmlReturn_t (*pfn_nvmlDeviceGetClockInfo)(nvmlDevice_t, int, unsigned int*);
+typedef CUresult (*pfn_cuDeviceGetAttribute)(int*, CUdevice_attribute, CUdevice);
 
 struct RealCUDA {
     void *h_cudart = nullptr;
@@ -141,6 +142,9 @@ struct RealCUDA {
 
     /* Local NVML device handles (one per local GPU) */
     nvmlDevice_t nvml_handles[8];
+
+    /* Driver API function pointers */
+    pfn_cuDeviceGetAttribute     cuDeviceGetAttribute = nullptr;
 
     /* Runtime API function pointers */
     pfn_cudaGetDeviceCount       GetDeviceCount = nullptr;
@@ -180,6 +184,7 @@ struct RealCUDA {
 
 static RealCUDA g_local;
 static int g_active_device = 0;
+static bool g_remote_first = false;
 static int g_remote_base = 0;       /* first remote device index = g_local.local_count */
 static std::string g_gpu_mode = "all";  /* "all", "remote", "local" */
 static std::string g_real_cuda_path = REAL_CUDA_DEFAULT_PATH;
@@ -187,12 +192,23 @@ static std::string g_transport_type = "tcp";  /* Phase 9: "tcp" or "rdma" */
 static bool g_local_initialized = false;
 
 static bool is_remote_device(int dev) {
-    if (!g_local.available) return true;
-    return dev >= g_local.local_count;
+    if (!g_local.available || g_gpu_mode == "remote") return true;
+    if (g_gpu_mode == "local") return false;
+    if (g_remote_first) {
+        return dev < g_total_remote_devices;
+    } else {
+        return dev >= g_local.local_count;
+    }
 }
 
 static int to_remote_device(int dev) {
+    if (g_remote_first) return dev;
     return dev - g_local.local_count;
+}
+
+static int to_local_device(int dev) {
+    if (g_remote_first) return dev - g_total_remote_devices;
+    return dev;
 }
 
 #ifndef _WIN32
@@ -335,6 +351,9 @@ static void init_local_gpu() {
         if (h) { g_local.h_cuda = (void*)h; cuda_path = sys_path; }
     }
     if (!g_local.h_cuda) return;  /* no local NVIDIA driver */
+
+    /* Load Driver API function pointers */
+    WINSYM_LOAD((HMODULE)g_local.h_cuda, cuDeviceGetAttribute, cuDeviceGetAttribute);
 
     /* Load cudart (try backup path first, then CUDA toolkit) */
     for (int i = 0; search_paths[i]; i++) {
@@ -763,9 +782,8 @@ static bool recv_all(sock_t fd, void *buf, size_t len);
 /* Get the active ServerConnection for the current device */
 static ServerConnection *active_server() {
     if (g_servers.empty()) return nullptr;
-    int dev = g_active_device;
-    if (g_local.available) dev = dev - g_local.local_count;
-    if (dev < 0) return nullptr;  /* local device */
+    if (!is_remote_device(g_active_device)) return nullptr;
+    int dev = to_remote_device(g_active_device);
     for (auto &s : g_servers) {
         if (dev < s->device_count) return s.get();
         dev -= s->device_count;
@@ -860,6 +878,7 @@ static void load_config_file(const char *path) {
         if (key == "server") parse_server_addr(val);
         else if (key == "log_level" && val == "debug") g_verbose = 1;
         else if (key == "gpu_mode") g_gpu_mode = val;
+        else if (key == "remote_first") g_remote_first = (val == "1" || val == "true" || val == "on");
         else if (key == "real_cuda_path") g_real_cuda_path = val;
         else if (key == "transport") g_transport_type = val;
     }
@@ -901,6 +920,9 @@ static void load_config() {
     /* Override real CUDA path from environment */
     const char *path_env = getenv("GPUSHARE_REAL_CUDA_PATH");
     if (path_env) g_real_cuda_path = path_env;
+
+    const char *rf_env = getenv("GPUSHARE_REMOTE_FIRST");
+    if (rf_env) g_remote_first = (std::string(rf_env) == "1" || std::string(rf_env) == "true");
 
     /* Detect local GPUs */
     init_local_gpu();
@@ -1119,7 +1141,7 @@ GPUSHARE_EXPORT cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop,
 
     /* Local GPU — delegate to real CUDA library */
     if (g_local.available && !is_remote_device(device) && g_local.GetDeviceProperties) {
-        cudaError_t err = g_local.GetDeviceProperties(prop, device);
+        cudaError_t err = g_local.GetDeviceProperties(prop, to_local_device(device));
         if (err == cudaSuccess && prop) {
             /* Append " (local)" to name so user can distinguish */
             size_t len = strlen(prop->name);
@@ -1197,7 +1219,7 @@ GPUSHARE_EXPORT cudaError_t cudaSetDevice(int device) {
     /* Local GPU — delegate to real CUDA library */
     if (g_local.available && !is_remote_device(device)) {
         if (g_local.SetDevice)
-            return g_local.SetDevice(device);
+            return g_local.SetDevice(to_local_device(device));
         return cudaSuccess;
     }
 
@@ -1645,15 +1667,14 @@ static bool g_props_cached = false;
 static int g_props_cached_device = -1;
 static gs_device_props_t g_cached_props;
 
-static CUresult cache_device_props() {
-    int dev = g_active_device;
+static CUresult cache_device_props(int dev) {
     if (g_props_cached && g_props_cached_device == dev) return CUDA_SUCCESS;
 
     /* Local GPU — get from real library and convert to our format */
     if (g_local.available && !is_remote_device(dev) && g_local.GetDeviceProperties) {
         struct cudaDeviceProp prop;
         memset(&prop, 0, sizeof(prop));
-        cudaError_t err = g_local.GetDeviceProperties(&prop, dev);
+        cudaError_t err = g_local.GetDeviceProperties(&prop, to_local_device(dev));
         if (err != cudaSuccess) return CUDA_ERROR_UNKNOWN;
         memset(&g_cached_props, 0, sizeof(g_cached_props));
         strncpy(g_cached_props.name, prop.name, sizeof(g_cached_props.name) - 1);
@@ -1683,7 +1704,7 @@ static CUresult cache_device_props() {
 
     /* Remote GPU */
     gs_device_props_req_t req;
-    req.device = is_remote_device(dev) ? to_remote_device(dev) : 0;
+    req.device = to_remote_device(dev);
     std::vector<uint8_t> resp;
     if (!rpc_call(GS_OP_GET_DEVICE_PROPS, &req, sizeof(req), resp)) return CUDA_ERROR_UNKNOWN;
     if (resp.size() < sizeof(gs_device_props_t)) return CUDA_ERROR_UNKNOWN;
@@ -1725,7 +1746,7 @@ GPUSHARE_EXPORT CUresult cuDeviceGet(CUdevice *device, int ordinal) {
 
 GPUSHARE_EXPORT CUresult cuDeviceGetName(char *name, int len, CUdevice dev) {
     TRACE("cuDeviceGetName(dev=%d)", dev);
-    CUresult err = cache_device_props();
+    CUresult err = cache_device_props(dev);
     if (err != CUDA_SUCCESS) return err;
     if (name && len > 0) {
         strncpy(name, g_cached_props.name, len - 1);
@@ -1736,7 +1757,7 @@ GPUSHARE_EXPORT CUresult cuDeviceGetName(char *name, int len, CUdevice dev) {
 
 GPUSHARE_EXPORT CUresult cuDeviceTotalMem_v2(size_t *bytes, CUdevice dev) {
     TRACE("cuDeviceTotalMem(dev=%d)", dev);
-    CUresult err = cache_device_props();
+    CUresult err = cache_device_props(dev);
     if (err != CUDA_SUCCESS) return err;
     if (bytes) *bytes = g_cached_props.total_global_mem;
     return CUDA_SUCCESS;
@@ -1748,7 +1769,7 @@ GPUSHARE_EXPORT CUresult cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
 
 GPUSHARE_EXPORT CUresult cuDeviceGetAttribute(int *pi, CUdevice_attribute attrib, CUdevice dev) {
     TRACE("cuDeviceGetAttribute(attr=%d, dev=%d)", (int)attrib, dev);
-    CUresult err = cache_device_props();
+    CUresult err = cache_device_props(dev);
     if (err != CUDA_SUCCESS) return err;
     if (!pi) return CUDA_ERROR_INVALID_VALUE;
 
@@ -1826,7 +1847,7 @@ GPUSHARE_EXPORT CUresult cuDeviceGetUuid(CUuuid *uuid, CUdevice dev) {
 
 GPUSHARE_EXPORT CUresult cuDeviceComputeCapability(int *major, int *minor, CUdevice dev) {
     TRACE("cuDeviceComputeCapability");
-    CUresult err = cache_device_props();
+    CUresult err = cache_device_props(dev);
     if (err != CUDA_SUCCESS) return err;
     if (major) *major = g_cached_props.major;
     if (minor) *minor = g_cached_props.minor;
@@ -2245,11 +2266,16 @@ GPUSHARE_EXPORT nvmlReturn_t nvmlSystemGetNVMLVersion(char *version, unsigned in
 
 GPUSHARE_EXPORT nvmlReturn_t nvmlDeviceGetCount_v2(unsigned int *deviceCount) {
     TRACE("nvmlDeviceGetCount_v2");
+    if (!ensure_connected()) {
+        if (deviceCount) *deviceCount = g_local.available ? g_local.local_count : 0;
+        return NVML_SUCCESS;
+    }
+
     unsigned int total = 0;
     if (g_local.available && g_gpu_mode != "remote")
         total += (unsigned int)g_local.local_count;
     if (g_gpu_mode != "local")
-        total += 1;  /* remote GPU */
+        total += (unsigned int)g_total_remote_devices;
     if (deviceCount) *deviceCount = total;
     return NVML_SUCCESS;
 }
@@ -2260,23 +2286,30 @@ GPUSHARE_EXPORT nvmlReturn_t nvmlDeviceGetCount(unsigned int *deviceCount) {
 
 GPUSHARE_EXPORT nvmlReturn_t nvmlDeviceGetHandleByIndex_v2(unsigned int index, nvmlDevice_t *device) {
     TRACE("nvmlDeviceGetHandleByIndex(%u)", index);
-    unsigned int total = 0;
-    if (g_local.available && g_gpu_mode != "remote")
-        total += (unsigned int)g_local.local_count;
-    if (g_gpu_mode != "local")
-        total += 1;
+    unsigned int total_local = (g_local.available && g_gpu_mode != "remote") ? g_local.local_count : 0;
+    unsigned int total_remote = (g_gpu_mode != "local") ? g_total_remote_devices : 0;
 
-    if (index >= total) return NVML_ERROR_INVALID_ARGUMENT;
+    if (index >= (total_local + total_remote)) return NVML_ERROR_INVALID_ARGUMENT;
 
-    /* Local GPU — return real NVML handle */
-    if (g_local.available && g_gpu_mode != "remote" && index < (unsigned int)g_local.local_count) {
-        if (device) *device = g_local.nvml_handles[index];
+    if (g_remote_first) {
+        /* Remote GPUs first (0..total_remote-1) */
+        if (index < total_remote) {
+            if (device) *device = g_nvml_device;
+            return NVML_SUCCESS;
+        }
+        /* Local GPUs after */
+        if (device) *device = g_local.nvml_handles[index - total_remote];
+        return NVML_SUCCESS;
+    } else {
+        /* Local GPUs first (standard) */
+        if (index < total_local) {
+            if (device) *device = g_local.nvml_handles[index];
+            return NVML_SUCCESS;
+        }
+        /* Remote GPU */
+        if (device) *device = g_nvml_device;
         return NVML_SUCCESS;
     }
-
-    /* Remote GPU — return our sentinel */
-    if (device) *device = g_nvml_device;
-    return NVML_SUCCESS;
 }
 
 GPUSHARE_EXPORT nvmlReturn_t nvmlDeviceGetHandleByIndex(unsigned int index, nvmlDevice_t *device) {
@@ -2435,7 +2468,9 @@ GPUSHARE_EXPORT nvmlReturn_t nvmlDeviceGetCudaComputeCapability(nvmlDevice_t dev
                                                                   int *major, int *minor) {
     if (is_local_nvml_handle(device) && g_local.NvmlDeviceGetCudaComputeCapability)
         return g_local.NvmlDeviceGetCudaComputeCapability(device, major, minor);
-    return (nvmlReturn_t)cuDeviceComputeCapability(major, minor, 0);
+    unsigned int index = 0;
+    nvmlDeviceGetIndex(device, &index);
+    return (nvmlReturn_t)cuDeviceComputeCapability(major, minor, (CUdevice)index);
 }
 
 GPUSHARE_EXPORT nvmlReturn_t nvmlDeviceGetClockInfo(nvmlDevice_t device, int type, unsigned int *clock) {
@@ -2452,11 +2487,16 @@ GPUSHARE_EXPORT nvmlReturn_t nvmlDeviceGetIndex(nvmlDevice_t device, unsigned in
         if (is_local_nvml_handle(device)) {
             /* Find which local device this handle corresponds to */
             for (int i = 0; i < g_local.local_count; i++) {
-                if (device == g_local.nvml_handles[i]) { *index = i; return NVML_SUCCESS; }
+                if (device == g_local.nvml_handles[i]) {
+                    if (g_remote_first) *index = (unsigned int)g_total_remote_devices + i;
+                    else *index = (unsigned int)i;
+                    return NVML_SUCCESS;
+                }
             }
             *index = 0;
         } else {
-            *index = (unsigned int)g_local.local_count;  /* remote GPU index */
+            if (g_remote_first) *index = 0;  /* first remote GPU index */
+            else *index = (unsigned int)g_local.local_count;  /* remote GPU index */
         }
     }
     return NVML_SUCCESS;

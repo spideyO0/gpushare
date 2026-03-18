@@ -316,6 +316,7 @@ done     Phase 8: Network Transport Abstraction ───── prerequisite for
 done     Phase 9: InfiniBand / RDMA Transport ─────── rCUDA's key advantage (97.7% wire speed)
 done     Phase 10: Transfer Compression ────────────── LZ4/zstd auto-detected, ratio threshold
 done     Phase 11: Multi-Server GPU Pooling ────────── rCUDA's multi-node GPU sharing
+done     Phase 14: Remote Priority Mode ────────────── Remote GPU as Device 0
            │
 research Phase 12: GPU Context Scheduling ──────────── multi-tenant fairness
 research Phase 13: GPUDirect RDMA ──────────────────── zero-copy NIC-to-GPU transfers

@@ -12,6 +12,7 @@
 
 param(
     [string]$Server     = "",
+    [switch]$RemoteFirst,
     [switch]$SkipBuild,
     [switch]$SkipPython,
     [switch]$Force,
@@ -26,6 +27,7 @@ if ($Server -match "^--") {
     # $Server captured a flag like "--force" because PowerShell didn't parse it
     switch -Regex ($Server) {
         "^--force$"       { $Force = $true }
+        "^--remote-first$"{ $RemoteFirst = $true }
         "^--skip-build$"  { $SkipBuild = $true }
         "^--skip-python$" { $SkipPython = $true }
         "^--auto-deps$"   { $AutoDeps = $true }
@@ -70,6 +72,7 @@ if ($Help) {
     Write-Host ""
     Write-Host "Options:"
     Write-Host "  -Server HOST:PORT   Set the server address"
+    Write-Host "  -RemoteFirst        Prioritize remote GPUs (Remote=Device 0)"
     Write-Host "  -SkipBuild          Skip cmake build (use existing build/ directory)"
     Write-Host "  -SkipPython         Do not install Python client package"
     Write-Host "  -Force              Force full reinstall (overwrite everything)"
@@ -902,10 +905,16 @@ if ($IsUpgrade -and (Test-Path $configFile)) {
     if ($hasTemplate) {
         $configContent = Get-Content $templateFile -Raw
         $configContent = $configContent -replace "(?m)^server=.*", "server=$Server"
+        if ($RemoteFirst) {
+            $configContent = $configContent -replace "(?m)^# remote_first=.*", "remote_first=true"
+        }
         Set-Content -Path $configFile -Value $configContent -NoNewline
     } else {
         # No template -write a minimal config
         $minimalConfig = "# gpushare client configuration`r`nserver=$Server"
+        if ($RemoteFirst) {
+            $minimalConfig += "`r`nremote_first=true"
+        }
         Set-Content -Path $configFile -Value $minimalConfig
     }
     Write-Ok "Config installed: $configFile (server=$Server)"

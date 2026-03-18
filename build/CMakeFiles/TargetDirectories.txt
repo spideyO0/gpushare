@@ -1,8 +1,0 @@
-/home/spideyo0/gpushare/build/CMakeFiles/gpushare-server.dir
-/home/spideyo0/gpushare/build/CMakeFiles/gpushare_client.dir
-/home/spideyo0/gpushare/build/CMakeFiles/edit_cache.dir
-/home/spideyo0/gpushare/build/CMakeFiles/rebuild_cache.dir
-/home/spideyo0/gpushare/build/CMakeFiles/list_install_components.dir
-/home/spideyo0/gpushare/build/CMakeFiles/install.dir
-/home/spideyo0/gpushare/build/CMakeFiles/install/local.dir
-/home/spideyo0/gpushare/build/CMakeFiles/install/strip.dir

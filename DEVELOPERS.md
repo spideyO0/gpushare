@@ -92,6 +92,12 @@ Server-side GPU pointers are opaque `uint64_t` values. On 64-bit clients, these 
 
 **Windows local GPU passthrough:** On Windows, local GPU passthrough is implemented using `LoadLibraryExA`/`GetProcAddress` (instead of `dlopen`/`dlsym` on POSIX). The client searches for real CUDA DLLs in the following order: `C:\Program Files\gpushare\real\`, `System32`, and `%CUDA_PATH%\bin`. This allows the client to load the genuine NVIDIA libraries for local GPU operations while still intercepting calls destined for the remote GPU.
 
+**Device Indexing and Prioritization:**
+The client supports blending local and remote GPUs into a single device list.
+- **Normal Mode (Default)**: Local GPUs are indices `0..N-1`, Remote GPUs are `N..M-1`.
+- **Remote Priority Mode**: If `GPUSHARE_REMOTE_FIRST=1` or `remote_first=true` in config, Remote GPUs are indices `0..K-1`, Local GPUs are `K..L-1`.
+- **Implementation**: The logic is centralized in `is_remote_device(index)`, `to_remote_device(index)`, and `to_local_device(index)`. All CUDA and NVML API implementations must use these helpers for routing.
+
 ### 1.3 Generated Stubs (codegen/)
 
 The code generation system has two tiers:

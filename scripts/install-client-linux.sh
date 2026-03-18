@@ -45,6 +45,7 @@ transparent — programs link against libcudart.so which is actually gpushare.
 Options:
   -h, --help            Show this help
   --server HOST:PORT    Set the server address (can also edit config later)
+  --remote-first        Prioritize remote GPUs (Remote=Device 0)
   --skip-build          Skip cmake/make (use existing build/)
   --skip-python         Do not install Python client package
   --no-symlinks         Install library but do not create CUDA symlinks
@@ -68,6 +69,7 @@ SKIP_PYTHON=false
 NO_SYMLINKS=false
 FORCE_REINSTALL=false
 AUTO_DEPS=false
+REMOTE_FIRST=false
 SERVER_ADDR=""
 for arg in "$@"; do
     case "$arg" in
@@ -76,6 +78,7 @@ for arg in "$@"; do
         --no-symlinks)  NO_SYMLINKS=true ;;
         --force)        FORCE_REINSTALL=true ;;
         --auto-deps)    AUTO_DEPS=true ;;
+        --remote-first) REMOTE_FIRST=true ;;
         --server=*)     SERVER_ADDR="${arg#--server=}" ;;
         --server)       shift_next=true ;;
         *) if [[ "${shift_next:-}" == true ]]; then SERVER_ADDR="$arg"; shift_next=false;
@@ -687,9 +690,15 @@ else
     if [[ -f "$CONF_DIR/client.conf" ]]; then
         warn "Config already exists at $CONF_DIR/client.conf — updating server address"
         sed -i "s|^server=.*|server=$SERVER_ADDR|" "$CONF_DIR/client.conf"
+        if [[ "$REMOTE_FIRST" == true ]]; then
+            sed -i "s|^# remote_first=.*|remote_first=true|" "$CONF_DIR/client.conf"
+        fi
     else
         sed "s|^server=.*|server=$SERVER_ADDR|" "$PROJECT_DIR/config/gpushare-client.conf" \
             > "$CONF_DIR/client.conf"
+        if [[ "$REMOTE_FIRST" == true ]]; then
+            sed -i "s|^# remote_first=.*|remote_first=true|" "$CONF_DIR/client.conf"
+        fi
     fi
     chmod 644 "$CONF_DIR/client.conf"
     ok "Config installed: $CONF_DIR/client.conf (server=$SERVER_ADDR)"
@@ -832,6 +841,9 @@ echo -e "${BOLD}═════════════════════�
 echo
 echo -e "  Distro:          ${CYAN}${DISTRO_ID}${NC} (${DISTRO_FAMILY})"
 echo -e "  Server:          ${CYAN}${SERVER_ADDR}${NC}"
+if [[ "$REMOTE_FIRST" == true ]]; then
+echo -e "  Remote Priority: ${GREEN}ACTIVE${NC} (Remote=Device 0)"
+fi
 echo -e "  Library:         $LIB_DIR/libgpushare_client.so"
 echo -e "  Config:          $CONF_DIR/client.conf"
 if [[ "$NO_SYMLINKS" == false ]]; then

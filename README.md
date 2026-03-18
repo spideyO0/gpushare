@@ -129,6 +129,15 @@ The hook uses two-phase discovery: first via ctypes to the loaded CUDA library, 
 
 All discovery has timeouts (5s ctypes, 3s TCP) so Python startup never hangs even if the server is unreachable.
 
+### Remote Priority Mode
+
+By default, if you have a local GPU, it is `Device 0` and the remote GPU is `Device 1`. You can flip this so the remote GPU becomes the primary device:
+
+- **Environment Variable**: `export GPUSHARE_REMOTE_FIRST=1`
+- **Configuration**: Set `remote_first=true` in `client.conf`.
+
+This is the most robust way to ensure applications like PyTorch "pick up" the powerful remote GPU automatically without any code changes.
+
 ### Transfer optimizations
 
 - **Pinned memory staging** — server uses pre-allocated page-locked buffers for DMA transfers

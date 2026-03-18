@@ -42,6 +42,7 @@ access to a remote gpushare server.
 Options:
   -h, --help            Show this help
   --server HOST:PORT    Set the server address (can also edit config later)
+  --remote-first        Prioritize remote GPUs (Remote=Device 0)
   --skip-build          Skip cmake/make (use existing build/)
   --skip-python         Do not install Python client package
   --force               Force full reinstall even if already installed
@@ -58,12 +59,14 @@ fi
 SKIP_BUILD=false
 SKIP_PYTHON=false
 FORCE_REINSTALL=false
+REMOTE_FIRST=false
 SERVER_ADDR=""
 for arg in "$@"; do
     case "$arg" in
         --skip-build)   SKIP_BUILD=true ;;
         --skip-python)  SKIP_PYTHON=true ;;
         --force)        FORCE_REINSTALL=true ;;
+        --remote-first) REMOTE_FIRST=true ;;
         --server=*)     SERVER_ADDR="${arg#--server=}" ;;
         *) die "Unknown option: $arg (try --help)" ;;
     esac
@@ -260,9 +263,15 @@ else
     if [[ -f "$CONF_DIR/client.conf" ]]; then
         warn "Config exists at $CONF_DIR/client.conf — updating server address"
         sed -i '' "s|^server=.*|server=$SERVER_ADDR|" "$CONF_DIR/client.conf"
+        if [[ "$REMOTE_FIRST" == true ]]; then
+            sed -i '' "s|^# remote_first=.*|remote_first=true|" "$CONF_DIR/client.conf"
+        fi
     else
         sed "s|^server=.*|server=$SERVER_ADDR|" "$PROJECT_DIR/config/gpushare-client.conf" \
             > "$CONF_DIR/client.conf"
+        if [[ "$REMOTE_FIRST" == true ]]; then
+            sed -i '' "s|^# remote_first=.*|remote_first=true|" "$CONF_DIR/client.conf"
+        fi
     fi
     ok "Config installed: $CONF_DIR/client.conf (server=$SERVER_ADDR)"
 fi
@@ -434,6 +443,9 @@ echo -e "${GREEN}  gpushare client ${RESULT_VERB} successfully!${NC}"
 echo -e "${BOLD}═══════════════════════════════════════════════════════${NC}"
 echo
 echo -e "  Server:          ${CYAN}${SERVER_ADDR}${NC}"
+if [[ "$REMOTE_FIRST" == true ]]; then
+echo -e "  Remote Priority: ${GREEN}ACTIVE${NC} (Remote=Device 0)"
+fi
 echo -e "  Library:         $LIB_DIR/libgpushare_client.dylib"
 echo -e "  Config:          $CONF_DIR/client.conf"
 echo -e "  CUDA override:   ${GREEN}ACTIVE${NC} (libcudart.dylib -> gpushare)"
