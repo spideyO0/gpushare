@@ -127,12 +127,15 @@ x = torch.randn(1000, device='cuda:1')  # tensor on remote GPU
 
 The hook uses two-phase discovery: first via ctypes to the loaded CUDA library, then via TCP fallback to the gpushare server. On Windows with a local GPU, `nvcuda.dll` in `torch\lib` provides the CUDA driver interception while PyTorch's bundled `cudart64_*.dll` is preserved intact (it has internal functions that `c10_cuda.dll` needs).
 
+All discovery has timeouts (5s ctypes, 3s TCP) so Python startup never hangs even if the server is unreachable.
+
 ### Transfer optimizations
 
 - **Pinned memory staging** — server uses pre-allocated page-locked buffers for DMA transfers
 - **Async memcpy** — H2D transfers return immediately after queuing GPU DMA
 - **Chunked pipelining** — transfers > 4 MB split into chunks, overlapping network I/O with GPU DMA
 - **Request pipelining** — client uses dedicated recv thread, multiple threads can have concurrent in-flight RPCs
+- **Connection timeout** — TCP connect uses non-blocking `select()` with 5s timeout, never blocks on unreachable servers
 - **Backward compatible** — old clients work with new server, new clients fall back gracefully with old server
 
 ## API coverage

@@ -34,6 +34,8 @@
   #include <netinet/tcp.h>
   #include <arpa/inet.h>
   #include <netdb.h>
+  #include <fcntl.h>
+  #include <errno.h>
   typedef int sock_t;
   #define SOCK_INVALID (-1)
 #endif
@@ -133,7 +135,7 @@ public:
     /* ── TCP-specific methods ────────────────────────────── */
 
     /* Connect to a remote host:port. Returns true on success. */
-    bool connect(const char *host, int port) {
+    bool connect(const char *host, int port, int timeout_sec = 5) {
         struct addrinfo hints = {}, *res = nullptr;
         hints.ai_family   = AF_UNSPEC;
         hints.ai_socktype = SOCK_STREAM;
@@ -146,17 +148,73 @@ public:
         for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
             sock_t s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
             if (s == SOCK_INVALID) continue;
-            if (::connect(s, ai->ai_addr, ai->ai_addrlen) == 0) {
-                fd_ = s;
-                freeaddrinfo(res);
-                snprintf(desc_, sizeof(desc_), "tcp:%s:%d", host, port);
-                return true;
-            }
+
+            /* Non-blocking connect with timeout to avoid hanging when
+             * the server is unreachable (default TCP SYN timeout is 60-120s) */
 #ifdef _WIN32
-            closesocket(s);
+            unsigned long nb = 1;
+            ioctlsocket(s, FIONBIO, &nb);
 #else
-            ::close(s);
+            int flags = fcntl(s, F_GETFL, 0);
+            fcntl(s, F_SETFL, flags | O_NONBLOCK);
 #endif
+            int rc = ::connect(s, ai->ai_addr, ai->ai_addrlen);
+            if (rc != 0) {
+#ifdef _WIN32
+                if (WSAGetLastError() == WSAEWOULDBLOCK) {
+#else
+                if (errno == EINPROGRESS) {
+#endif
+                    /* Wait for connect with timeout using select() */
+                    fd_set wfds;
+                    FD_ZERO(&wfds);
+                    FD_SET(s, &wfds);
+                    struct timeval tv;
+                    tv.tv_sec = timeout_sec;
+                    tv.tv_usec = 0;
+                    rc = select((int)s + 1, nullptr, &wfds, nullptr, &tv);
+                    if (rc <= 0) {
+                        /* Timeout or error */
+#ifdef _WIN32
+                        closesocket(s);
+#else
+                        ::close(s);
+#endif
+                        continue;
+                    }
+                    /* Check if connect actually succeeded */
+                    int err = 0;
+                    socklen_t errlen = sizeof(err);
+                    getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&err, &errlen);
+                    if (err != 0) {
+#ifdef _WIN32
+                        closesocket(s);
+#else
+                        ::close(s);
+#endif
+                        continue;
+                    }
+                } else {
+#ifdef _WIN32
+                    closesocket(s);
+#else
+                    ::close(s);
+#endif
+                    continue;
+                }
+            }
+
+            /* Restore blocking mode */
+#ifdef _WIN32
+            nb = 0;
+            ioctlsocket(s, FIONBIO, &nb);
+#else
+            fcntl(s, F_SETFL, flags);
+#endif
+            fd_ = s;
+            freeaddrinfo(res);
+            snprintf(desc_, sizeof(desc_), "tcp:%s:%d", host, port);
+            return true;
         }
         freeaddrinfo(res);
         return false;
