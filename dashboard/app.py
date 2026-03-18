@@ -172,7 +172,7 @@ def _query_gs_server(host, port, fetch_gpu=False):
         # Close
         _gs_send_msg(sock, GS_OP_CLOSE, 4)
         sock.close()
-        if payload is None or len(payload) < 44:
+        if payload is None or len(payload) < 52:
             return None
         # Parse gs_stats_header_t (packed)
         # Q uptime, Q total_ops, Q bytes_in, Q bytes_out, Q alloc, I active, I total_conn, I num_clients
@@ -249,6 +249,7 @@ class Poller(threading.Thread):
     def _tick_server(self):
         gpu = _parse_nvidia_smi()
         _state["gpu"] = gpu
+        cur_time = time.time()
 
         # Get client info and server stats from the gpushare server
         stats = _query_gs_server(self.gs_host, self.gs_port, fetch_gpu=False)
@@ -262,14 +263,27 @@ class Poller(threading.Thread):
             _state["total_connections"] = stats.get("total_connections", 0)
             _state["server_uptime"] = stats.get("uptime", 0)
             _state["alloc_mb"] = stats.get("alloc_mb", 0)
-            # Bandwidth: delta from last sample
-            prev_in = getattr(self, "_prev_bytes_in", 0)
-            prev_out = getattr(self, "_prev_bytes_out", 0)
+            # Bandwidth: delta from last sample (bytes/sec)
             cur_in = stats.get("bytes_in", 0)
             cur_out = stats.get("bytes_out", 0)
-            bw = (cur_in - prev_in + cur_out - prev_out) / max(REFRESH_INTERVAL_SEC, 1)
+            if hasattr(self, "_prev_tick_time"):
+                dt = cur_time - self._prev_tick_time
+                d_in = cur_in - self._prev_bytes_in
+                d_out = cur_out - self._prev_bytes_out
+                # Handle server restart (counters reset to 0)
+                if d_in < 0:
+                    d_in = cur_in
+                if d_out < 0:
+                    d_out = cur_out
+                if dt > 0:
+                    bw = (d_in + d_out) / dt
+                else:
+                    bw = 0
+            else:
+                bw = 0
             self._prev_bytes_in = cur_in
             self._prev_bytes_out = cur_out
+            self._prev_tick_time = cur_time
         else:
             _state["connected"] = gpu is not None  # at least GPU is visible
             _state["clients"] = _state.get("clients", [])
@@ -295,6 +309,7 @@ class Poller(threading.Thread):
 
     def _tick_client(self):
         # Client mode: fetch GPU status from the server (no local nvidia-smi)
+        cur_time = time.time()
         stats = _query_gs_server(self.gs_host, self.gs_port, fetch_gpu=True)
         if stats and isinstance(stats, dict):
             _state["connected"] = True
@@ -320,14 +335,26 @@ class Poller(threading.Thread):
                     "power_draw": gs["power_draw_mw"] / 1000.0,
                     "power_limit": gs["power_limit_mw"] / 1000.0,
                 }
-            # Bandwidth: delta from last sample
-            prev_in = getattr(self, "_prev_bytes_in", 0)
-            prev_out = getattr(self, "_prev_bytes_out", 0)
+            # Bandwidth: delta from last sample (bytes/sec)
             cur_in = stats.get("bytes_in", 0)
             cur_out = stats.get("bytes_out", 0)
-            bw = (cur_in - prev_in + cur_out - prev_out) / max(REFRESH_INTERVAL_SEC, 1)
+            if hasattr(self, "_prev_tick_time"):
+                dt = cur_time - self._prev_tick_time
+                d_in = cur_in - self._prev_bytes_in
+                d_out = cur_out - self._prev_bytes_out
+                if d_in < 0:
+                    d_in = cur_in
+                if d_out < 0:
+                    d_out = cur_out
+                if dt > 0:
+                    bw = (d_in + d_out) / dt
+                else:
+                    bw = 0
+            else:
+                bw = 0
             self._prev_bytes_in = cur_in
             self._prev_bytes_out = cur_out
+            self._prev_tick_time = cur_time
             _state["error"] = None
         else:
             _state["connected"] = False
@@ -499,7 +526,7 @@ a{color:var(--accent);text-decoration:none}
   <h2>Connected Clients</h2>
   <table class="tbl">
     <thead><tr>
-      <th>IP Address</th><th>Session ID</th><th>Memory (MiB)</th><th>Ops</th><th>Bandwidth</th><th>Connected</th>
+      <th>IP Address</th><th>Session ID</th><th>Memory (MiB)</th><th>Ops</th><th>Transfer</th><th>Connected</th>
     </tr></thead>
     <tbody id="clientsBody">
       <tr><td colspan="6" style="text-align:center;color:var(--text-dim)">No clients connected</td></tr>
@@ -713,9 +740,10 @@ function update(d){
       clientsBody.innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--text-dim)">No clients connected</td></tr>';
     }else{
       clientsBody.innerHTML=clients.map(c=>{
-        const bw=(c.bytes_in||0)+(c.bytes_out||0);
+        const xferIn=fmtBytes(c.bytes_in||0);
+        const xferOut=fmtBytes(c.bytes_out||0);
         const conn=c.connected_secs?fmtUptime(c.connected_secs):"—";
-        return `<tr><td>${esc(c.addr||c.ip||"—")}</td><td>${c.session_id||c.session||"—"}</td><td>${(c.mem_allocated_mb||c.memory||0).toFixed(0)}</td><td>${(c.ops||0).toLocaleString()}</td><td>${fmtBytes(bw)}</td><td>${conn}</td></tr>`;
+        return `<tr><td>${esc(c.addr||c.ip||"—")}</td><td>${c.session_id||c.session||"—"}</td><td>${(c.mem_allocated_mb||c.memory||0).toFixed(0)}</td><td>${(c.ops||0).toLocaleString()}</td><td title="In: ${xferIn}, Out: ${xferOut}">${xferIn} / ${xferOut}</td><td>${conn}</td></tr>`;
       }).join("");
     }
   }
