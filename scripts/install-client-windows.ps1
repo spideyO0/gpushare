@@ -568,22 +568,52 @@ $hookInstalled = $false
 if ((Test-Path $hookSrc) -and (Test-Path $pthSrc)) {
     # Ask Python itself where site-packages is (works for MS Store, standard, conda, etc.)
     $siteDirs = @()
-    foreach ($pyExeName in @("python", "python3")) {
+    # On Windows, "python3" is often a MS Store stub that opens the Store app
+    # and hangs. Only use "python" (the real interpreter).
+    foreach ($pyExeName in @("python")) {
         $pyExe = Get-Command $pyExeName -ErrorAction SilentlyContinue
         if (-not $pyExe) { continue }
+        # Skip MS Store stubs in WindowsApps (they hang or open Store)
+        if ($pyExe.Source -match "WindowsApps") { continue }
         try {
-            $pyOutput = & $pyExe.Source -c "import site; print('|'.join(site.getsitepackages()))" 2>$null
-            if ($LASTEXITCODE -eq 0 -and $pyOutput) {
-                $siteDirs += $pyOutput.Split('|') | Where-Object { $_ -ne "" }
+            # Use Start-Process with timeout to avoid hanging
+            $tmpFile = [System.IO.Path]::GetTempFileName()
+            $proc = Start-Process -FilePath $pyExe.Source -ArgumentList "-c", "import site; print('|'.join(site.getsitepackages())); print('USER|' + site.getusersitepackages())" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $tmpFile -RedirectStandardError ([System.IO.Path]::GetTempFileName()) -ErrorAction Stop
+            if (-not $proc.WaitForExit(10000)) {
+                $proc.Kill()
+                Write-Warn "Python site-packages query timed out"
+            } elseif ($proc.ExitCode -eq 0) {
+                $lines = Get-Content $tmpFile -ErrorAction SilentlyContinue
+                foreach ($line in $lines) {
+                    if ($line -match "^USER\|(.+)$") {
+                        $siteDirs += $Matches[1].Trim()
+                    } elseif ($line.Trim() -ne "") {
+                        $siteDirs += $line.Split('|') | Where-Object { $_ -ne "" }
+                    }
+                }
             }
-            # Also get the user site-packages
-            $pyUserSite = & $pyExe.Source -c "import site; print(site.getusersitepackages())" 2>$null
-            if ($LASTEXITCODE -eq 0 -and $pyUserSite -and $pyUserSite.Trim() -ne "") {
-                $siteDirs += $pyUserSite.Trim()
-            }
+            Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
         } catch { }
     }
-    # Also try guessing for standard installs (fallback)
+    # Also discover from each known Python installation directly
+    foreach ($pyDir in $pythonDirs) {
+        # Skip WindowsApps stubs
+        if ($pyDir -match "WindowsApps") { continue }
+        $pyExePath = Join-Path $pyDir "python.exe"
+        if (-not (Test-Path $pyExePath)) { continue }
+        try {
+            $tmpFile = [System.IO.Path]::GetTempFileName()
+            $proc = Start-Process -FilePath $pyExePath -ArgumentList "-c", "import site; print('|'.join(site.getsitepackages()))" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $tmpFile -RedirectStandardError ([System.IO.Path]::GetTempFileName()) -ErrorAction Stop
+            if ($proc.ExitCode -eq 0) {
+                $lines = Get-Content $tmpFile -ErrorAction SilentlyContinue
+                foreach ($line in $lines) {
+                    $siteDirs += $line.Split('|') | Where-Object { $_ -ne "" }
+                }
+            }
+            Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
+        } catch { }
+    }
+    # Guess standard paths as fallback
     foreach ($pyDir in $pythonDirs) {
         $guessDir = Join-Path $pyDir "Lib\site-packages"
         if (Test-Path $guessDir) {
@@ -670,15 +700,21 @@ if ($siteDirs) {
     }
 }
 
-# Strategy 2: Ask Python directly (may fail if running as admin with different env)
-foreach ($pyExeName in @("python", "python3")) {
-    $pyExe = Get-Command $pyExeName -ErrorAction SilentlyContinue
-    if (-not $pyExe) { continue }
+# Strategy 2: Ask each real Python where torch\lib is
+foreach ($pyDir in $pythonDirs) {
+    if ($pyDir -match "WindowsApps") { continue }
+    $pyExePath = Join-Path $pyDir "python.exe"
+    if (-not (Test-Path $pyExePath)) { continue }
     try {
-        $torchLibPath = & $pyExe.Source -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))" 2>$null
-        if ($LASTEXITCODE -eq 0 -and $torchLibPath -and (Test-Path $torchLibPath.Trim())) {
-            $torchLibDirs += $torchLibPath.Trim()
+        $tmpFile = [System.IO.Path]::GetTempFileName()
+        $proc = Start-Process -FilePath $pyExePath -ArgumentList "-c", "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $tmpFile -RedirectStandardError ([System.IO.Path]::GetTempFileName()) -ErrorAction Stop
+        if ($proc.ExitCode -eq 0) {
+            $torchOut = (Get-Content $tmpFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+            if ($torchOut -and (Test-Path $torchOut.Trim())) {
+                $torchLibDirs += $torchOut.Trim()
+            }
         }
+        Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
     } catch { }
 }
 

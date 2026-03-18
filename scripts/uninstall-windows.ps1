@@ -218,20 +218,32 @@ if (-not $hasPyPkg) {
 # 6b. Python startup hook files (gpushare_hook.py + gpushare.pth in site-packages)
 $hookFiles = @()
 $hookSiteDirs = @()
-# Discover site-packages via Python
-foreach ($pyExeName in @("python", "python3")) {
-    $pyExe = Get-Command $pyExeName -ErrorAction SilentlyContinue
-    if (-not $pyExe) { continue }
+# Discover site-packages via Python (skip WindowsApps stubs that hang)
+$pyExe = Get-Command python -ErrorAction SilentlyContinue
+if ($pyExe -and $pyExe.Source -notmatch "WindowsApps") {
     try {
-        $pyOutput = & $pyExe.Source -c "import site; print('|'.join(site.getsitepackages()))" 2>$null
-        if ($LASTEXITCODE -eq 0 -and $pyOutput) {
-            $hookSiteDirs += $pyOutput.Split('|') | Where-Object { $_ -ne "" }
+        $tmpFile = [System.IO.Path]::GetTempFileName()
+        $proc = Start-Process -FilePath $pyExe.Source -ArgumentList "-c", "import site; print('|'.join(site.getsitepackages())); print('USER|' + site.getusersitepackages())" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $tmpFile -RedirectStandardError ([System.IO.Path]::GetTempFileName()) -ErrorAction Stop
+        if ($proc.ExitCode -eq 0) {
+            $lines = Get-Content $tmpFile -ErrorAction SilentlyContinue
+            foreach ($line in $lines) {
+                if ($line -match "^USER\|(.+)$") {
+                    $hookSiteDirs += $Matches[1].Trim()
+                } elseif ($line.Trim() -ne "") {
+                    $hookSiteDirs += $line.Split('|') | Where-Object { $_ -ne "" }
+                }
+            }
         }
-        $pyUserSite = & $pyExe.Source -c "import site; print(site.getusersitepackages())" 2>$null
-        if ($LASTEXITCODE -eq 0 -and $pyUserSite -and $pyUserSite.Trim() -ne "") {
-            $hookSiteDirs += $pyUserSite.Trim()
-        }
+        Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
     } catch { }
+}
+# Also check all known Python installations
+$pySearchDirs = @()
+$pySearchDirs += Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+$pySearchDirs += Get-ChildItem "C:\Python*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+foreach ($pyDir in $pySearchDirs) {
+    $guessDir = Join-Path $pyDir "Lib\site-packages"
+    if (Test-Path $guessDir) { $hookSiteDirs += $guessDir }
 }
 # Also scan MS Store Python package directories
 $msStoreBase = Join-Path $env:LOCALAPPDATA "Packages"
