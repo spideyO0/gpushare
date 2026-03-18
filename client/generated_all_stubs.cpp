@@ -386,8 +386,6 @@ STUB_EXPORT int WEAK_SYM cuFuncSetCacheConfig() { return 0; }
 STUB_EXPORT int WEAK_SYM cuFuncSetSharedMemConfig() { return 0; }
 STUB_EXPORT int WEAK_SYM cuFuncSetSharedSize() { return 0; }
 STUB_EXPORT int WEAK_SYM cuGetExportTable() { return 0; }
-STUB_EXPORT int WEAK_SYM cuGetProcAddress() { return 0; }
-STUB_EXPORT int WEAK_SYM cuGetProcAddress_v2() { return 0; }
 STUB_EXPORT int WEAK_SYM cuGetProcAddress_v2_ptsz() { return 0; }
 STUB_EXPORT int WEAK_SYM cuGraphAddBatchMemOpNode() { return 0; }
 STUB_EXPORT int WEAK_SYM cuGraphAddChildGraphNode() { return 0; }

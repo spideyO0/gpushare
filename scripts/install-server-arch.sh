@@ -161,7 +161,7 @@ if [[ "$SKIP_BUILD" == false ]]; then
     fi
 
     # Remove weak stubs that conflict with strong implementations
-    local all_stubs="$PROJECT_DIR/client/generated_all_stubs.cpp"
+    all_stubs="$PROJECT_DIR/client/generated_all_stubs.cpp"
     if [[ -f "$all_stubs" ]] && grep -q 'WEAK_SYM cuGetProcAddress()' "$all_stubs" 2>/dev/null; then
         sed -i '/STUB_EXPORT int WEAK_SYM cuGetProcAddress() /d' "$all_stubs"
         sed -i '/STUB_EXPORT int WEAK_SYM cuGetProcAddress_v2() /d' "$all_stubs"
