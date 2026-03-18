@@ -186,6 +186,7 @@ static RealCUDA g_local;
 static int g_active_device = 0;
 static bool g_remote_first = false;
 static int g_remote_base = 0;       /* first remote device index = g_local.local_count */
+static int g_total_remote_devices = 0;  /* forward decl — set in ensure_connected() */
 static std::string g_gpu_mode = "all";  /* "all", "remote", "local" */
 static std::string g_real_cuda_path = REAL_CUDA_DEFAULT_PATH;
 static std::string g_transport_type = "tcp";  /* Phase 9: "tcp" or "rdma" */
@@ -769,7 +770,7 @@ static uint32_t     g_server_caps = 0;
 /* Map global device index -> (server_index, local_device_on_server) */
 struct DeviceRoute { int server_idx; int local_device; };
 static std::vector<DeviceRoute> g_device_routes;
-static int g_total_remote_devices = 0;
+/* g_total_remote_devices declared earlier (near g_remote_first) */
 
 /* Config: parsed server addresses */
 struct ServerAddr { std::string host; int port; };
@@ -1954,7 +1955,7 @@ GPUSHARE_EXPORT CUresult cuMemsetD32_v2(CUdeviceptr dptr, unsigned int ui, size_
 }
 
 GPUSHARE_EXPORT CUresult cuMemGetInfo_v2(size_t *free, size_t *total) {
-    CUresult err = cache_device_props();
+    CUresult err = cache_device_props(g_active_device);
     if (err != CUDA_SUCCESS) return err;
     if (total) *total = g_cached_props.total_global_mem;
     if (free)  *free  = g_cached_props.total_global_mem;  /* approximate */
@@ -2338,7 +2339,7 @@ GPUSHARE_EXPORT nvmlReturn_t nvmlDeviceGetName(nvmlDevice_t device, char *name, 
         return ret;
     }
     /* Remote GPU */
-    CUresult err = cache_device_props();
+    CUresult err = cache_device_props(g_active_device);
     if (err != CUDA_SUCCESS) return NVML_ERROR_UNKNOWN;
     if (name && length > 0) {
         strncpy(name, g_cached_props.name, length - 1);
@@ -2463,6 +2464,9 @@ GPUSHARE_EXPORT nvmlReturn_t nvmlDeviceGetPciInfo_v3(nvmlDevice_t device, nvmlPc
 GPUSHARE_EXPORT nvmlReturn_t nvmlDeviceGetPciInfo(nvmlDevice_t d, nvmlPciInfo_t *p) {
     return nvmlDeviceGetPciInfo_v3(d, p);
 }
+
+/* Forward declaration — nvmlDeviceGetIndex defined below */
+extern "C" GPUSHARE_EXPORT nvmlReturn_t nvmlDeviceGetIndex(nvmlDevice_t device, unsigned int *index);
 
 GPUSHARE_EXPORT nvmlReturn_t nvmlDeviceGetCudaComputeCapability(nvmlDevice_t device,
                                                                   int *major, int *minor) {

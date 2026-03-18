@@ -1,3 +1,51 @@
-./build/
+# Build artifacts
+build/
+build2/
+*.o
+*.obj
+*.so
+*.so.*
+*.dll
+*.dylib
+*.lib
+*.a
+*.exp
+*.pdb
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+dist/
+*.whl
+
+# Virtual environments
 .env
 .venv
+venv/
+env/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# OS files
+*.log
+*.tmp
+*.bak
+
+# Secrets / local config
+*.local
+.env.local

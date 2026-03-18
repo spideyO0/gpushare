@@ -125,9 +125,12 @@ All scripts support: `--force` (full reinstall), upgrade detection (IS_UPGRADE),
 23. **Python hook must not hang**: The hook's ctypes GPU discovery (`_query_devices_ctypes`) runs in a daemon thread with `t.join(timeout=5)`. The TCP fallback uses `sock.settimeout(3.0)`. Worst case when server is unreachable: 8 seconds added to Python startup, then continues without remote GPU. Never blocks indefinitely.
 24. **Never run python.exe in install scripts on Windows**: The `python.exe` or `python3.exe` command can hang on Windows (MS Store stubs open the Store, or our own hook loads and tries to connect to the server). All site-packages and torch\lib discovery must use pure filesystem scanning. Set `GPUSHARE_NO_HOOK=1` env var before any unavoidable python.exe calls (e.g., pip install).
 25. **cuDNN headers in /usr/include**: On Arch Linux, cuDNN is a separate package that installs headers to `/usr/include/`, not `/opt/cuda/include/`. `codegen/parse_headers.py` searches fallback directories (`/usr/include`, `/usr/local/include`, `/usr/local/cuda/include`) when headers aren't found in the CUDA toolkit path.
-26. **Remote Indexing and Prioritization**: If `remote_first` is enabled, the device mapping changes globally. All functions (`cudaSetDevice`, `cudaGetDeviceProperties`, `nvmlDeviceGetHandleByIndex`, etc.) must use `to_local_device()` or `to_remote_device()` to translate the user-provided index (virtual index) into a physical index for either the local backend or the remote server. Failing to do so causes "invalid device" errors when targeting local GPUs in remote-first mode.
+L128- 26. **Remote Indexing and Prioritization**: If `remote_first` is enabled, the device mapping changes globally. All functions (`cudaSetDevice`, `cudaGetDeviceProperties`, `nvmlDeviceGetHandleByIndex`, etc.) must use `to_local_device()` or `to_remote_device()` to translate the user-provided index (virtual index) into a physical index for either the local backend or the remote server. Failing to do so causes "invalid device" errors when targeting local GPUs in remote-first mode.
+L129- 27. **cache_device_props(int dev) Scope**: This function is per-device. Callers must pass the specific device index (often `g_active_device`) to ensure properties (name, memory, compute capability) are queried and cached for the correct target.
+L130- 28. **NVML Forward Declarations**: Due to the complex mapping between NVML handles and virtual indices, `nvmlDeviceGetIndex` and `nvmlDeviceGetHandleByIndex` often require forward declarations to avoid undeclared identifier errors in earlier functions like `nvmlDeviceGetCudaComputeCapability`.
+L131- 
+L132- ## How to test
 
-## How to test
 
 
 ```bash
