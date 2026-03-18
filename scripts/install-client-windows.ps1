@@ -715,9 +715,16 @@ if (Test-Path $condaBase) {
 }
 $torchLibDirs = $torchLibDirs | Sort-Object -Unique
 
+# In torch\lib, ONLY replace nvcuda.dll (the CUDA driver).
+# Do NOT replace cudart64_*.dll -- PyTorch's bundled CUDA runtime has internal
+# functions (__cudaRegisterFatBinary, __cudaRegisterFunction, etc.) that
+# c10_cuda.dll needs. Our DLL doesn't export these.
+# The bundled cudart64 internally calls nvcuda.dll for GPU operations,
+# so replacing nvcuda.dll is sufficient to intercept all GPU calls.
+$torchOverrideDlls = @("nvcuda.dll")
 foreach ($torchLib in $torchLibDirs) {
     $count = 0
-    foreach ($dll in $overrideDlls) {
+    foreach ($dll in $torchOverrideDlls) {
         $srcDll = Join-Path $InstallDir $dll
         $dstDll = Join-Path $torchLib $dll
         if (-not (Test-Path $srcDll)) { continue }
@@ -737,8 +744,23 @@ foreach ($torchLib in $torchLibDirs) {
             Write-Warn "Could not copy $dll to $torchLib : $_"
         }
     }
+    # Restore any previously-overridden cudart DLLs in torch\lib
+    # (from earlier installs that incorrectly replaced them)
+    foreach ($rtDll in @("cudart64_12.dll", "cudart64_130.dll", "nvml.dll")) {
+        $rtPath = Join-Path $torchLib $rtDll
+        if (-not (Test-Path $rtPath)) { continue }
+        $backupName = "torch_$rtDll"
+        $backupPath = Join-Path $realBackupDir $backupName
+        if ($ourSize -gt 0) {
+            $rtSize = (Get-Item $rtPath).Length
+            if (($rtSize -eq $ourSize) -and (Test-Path $backupPath)) {
+                Copy-Item -Force $backupPath $rtPath
+                Write-Ok "Restored original $rtDll in torch\lib (was incorrectly overridden)"
+            }
+        }
+    }
     if ($count -gt 0) {
-        Write-Ok "Installed $count DLLs to $torchLib"
+        Write-Ok "Installed $count DLLs to $torchLib (nvcuda.dll only - cudart preserved)"
     }
 }
 if ($torchLibDirs.Count -eq 0) {

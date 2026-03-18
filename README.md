@@ -114,14 +114,18 @@ Flag bits: `0x0004` chunked, `0x0008` last chunk. Server advertises capabilities
 
 133 functions have full argument-aware RPC serialization (cuBLAS GEMM, cuDNN convolutions, etc.) with async and chunked transfer support. The remaining 2,432+ functions are exported as symbols for link compatibility.
 
-### PyTorch integration (Windows + dual-GPU)
+### PyTorch integration (all platforms)
 
-On machines with a local NVIDIA GPU, a Python startup hook (`gpushare.pth`) automatically patches `torch.cuda` to include remote GPUs alongside local ones. No code changes needed:
+A Python startup hook (`gpushare.pth` + `gpushare_hook.py`) automatically patches `torch.cuda` to include remote GPUs alongside local ones. No code changes needed:
 
 ```python
-torch.cuda.device_count()  # returns local + remote count
-torch.cuda.get_device_name(1)  # returns remote GPU name
+torch.cuda.device_count()       # returns local + remote count
+torch.cuda.get_device_name(1)   # returns remote GPU name
+torch.cuda.set_device(1)        # use remote GPU
+x = torch.randn(1000, device='cuda:1')  # tensor on remote GPU
 ```
+
+The hook uses two-phase discovery: first via ctypes to the loaded CUDA library, then via TCP fallback to the gpushare server. On Windows with a local GPU, `nvcuda.dll` in `torch\lib` provides the CUDA driver interception while PyTorch's bundled `cudart64_*.dll` is preserved intact (it has internal functions that `c10_cuda.dll` needs).
 
 ### Transfer optimizations
 
@@ -292,7 +296,7 @@ gpushare/
 - **CUDA compute only** — graphics APIs (DirectX, Vulkan, OpenGL) are not supported. Blender rendering, games, and Photoshop GPU acceleration require a local GPU or a streaming solution (Sunshine/Moonlight).
 - **1 Gbps bandwidth limit** — large data transfers (>100 MB) are bottlenecked by the network. Chunked pipelining helps saturate the link by overlapping network I/O with GPU DMA, but the physical limit remains. For training, keep data on the server side.
 - **PyTorch on macOS** — Apple's PyTorch builds are CPU-only (CUDA compiled out). Use the gpushare Python API directly for ML on Mac.
-- **Windows with local GPU** — transparent DLL replacement is not possible (NVIDIA driver DLLs are locked). A Python startup hook patches PyTorch instead. Works with any PyTorch application.
+- **Windows with local GPU** — `nvcuda.dll` in System32 is locked by the NVIDIA driver, but gpushare overrides it by placing our DLL in `torch\lib` (PyTorch adds this via `os.add_dll_directory()`). Only `nvcuda.dll` is replaced in torch\lib; `cudart64_*.dll` must NOT be replaced (c10_cuda.dll needs internal CUDA runtime functions our DLL doesn't export). The C library routes device 0 to local GPU via backed-up real DLLs, device 1+ to remote server.
 - **Windows Task Manager** — cannot show remote GPUs (requires kernel-mode WDDM driver). Use nvidia-smi or the tray widget instead.
 
 ## License

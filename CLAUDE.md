@@ -91,12 +91,12 @@ All structs use `PACKED_STRUCT_BEGIN`/`PACKED_STRUCT_END` macros for MSVC portab
 
 All scripts support: `--force` (full reinstall), upgrade detection (IS_UPGRADE), config preservation, stale CMake cache cleaning.
 
-- `install-server-arch.sh`: Arch Linux server setup, systemd services, codegen step, firewall, creates CUDA symlinks + ldconfig + backs up real libs + installs client.conf for dual-GPU support on the server machine itself
-- `install-client-linux.sh`: 9 distro families auto-detected, auto-installs deps, SELinux/AppArmor handling, 32+ symlinks
-- `install-client-macos.sh`: Homebrew deps, quarantine clearing on ALL files, launchd plist, SIP-safe shebangs
-- `install-client-windows.ps1`: VS/MinGW/MSYS2 auto-detect, version-to-year mapping for CMake generator, 12 DLL copies, registry GPU adapter, Defender exclusion, startup shortcut for tray widget, backs up real CUDA DLLs to `C:\Program Files\gpushare\real\` before any overrides
-- `uninstall.sh`: Cross-platform (Linux/macOS), dry-run support
-- `uninstall-windows.ps1`: 9-component removal including tray process kill, registry cleanup, startup shortcut
+- `install-server-arch.sh`: Arch Linux server setup, systemd services, codegen step, firewall, creates CUDA symlinks in `/usr/local/lib/gpushare/` (reference only, real CUDA keeps priority on server), backs up real libs, installs client.conf for dual-GPU support on the server machine itself
+- `install-client-linux.sh`: 9 distro families auto-detected, auto-installs deps, SELinux/AppArmor handling, creates symlinks in `/usr/lib/` (system library dir, found by dynamic linker) + installs Python startup hook to site-packages
+- `install-client-macos.sh`: Homebrew deps, quarantine clearing on ALL files, launchd plist, SIP-safe shebangs, installs Python startup hook to site-packages
+- `install-client-windows.ps1`: VS/MinGW/MSYS2 auto-detect, always installs DLL overrides (even with local GPU), copies nvcuda.dll into torch\lib (critical: only nvcuda.dll, NOT cudart64_*.dll), registry GPU adapter, Defender exclusion, backs up real CUDA DLLs to `C:\Program Files\gpushare\real\`, installs Python hook via `site.getsitepackages()` (works for MS Store Python), handles `--force` in both `-Force` and `--force` styles
+- `uninstall.sh`: Cross-platform (Linux/macOS), dry-run support, removes symlinks from `/usr/lib/`, removes Python hook from all site-packages
+- `uninstall-windows.ps1`: 11-component removal including tray process kill, registry cleanup, startup shortcut, Python hook from all site-packages (including MS Store Python), DLL overrides from torch\lib with backup restoration
 
 ## Critical gotchas (from development)
 
@@ -113,6 +113,14 @@ All scripts support: `--force` (full reinstall), upgrade detection (IS_UPGRADE),
 11. **DllMain loader lock deadlock**: On Windows, calling `join()` on the recv thread inside `DllMain(DLL_PROCESS_DETACH)` deadlocks because the loader lock prevents the thread from exiting. Use `detach()` instead and let the OS clean up.
 12. **Client pthread linking**: The pipelined recv thread requires `-lpthread` on Linux/macOS. CMakeLists.txt must link pthread for the client on non-Windows platforms.
 13. **Windows CUDA_VISIBLE_DEVICES**: NEVER set `CUDA_VISIBLE_DEVICES` to a remote GPU index — it makes CUDA see 0 devices. Use `torch.cuda.set_device()` for remote GPUs instead.
+14. **cuGetProcAddress is critical**: CUDA 12+ uses `cuGetProcAddress` for runtime symbol resolution. PyTorch's `c10_cuda.dll` calls it to resolve ALL CUDA functions. Must be implemented properly (using `GetProcAddress(self)` on Windows / `dlsym(RTLD_DEFAULT)` on Linux), NOT a weak stub. Without it: WinError 127 on Windows.
+15. **Windows torch\lib: only replace nvcuda.dll**: Do NOT replace `cudart64_*.dll` in `torch\lib`. PyTorch's bundled CUDA runtime has internal functions (`__cudaRegisterFatBinary`, `__cudaRegisterFunction`) that `c10_cuda.dll` needs. Our DLL doesn't export these. Only replace `nvcuda.dll` — the bundled cudart internally calls nvcuda for GPU ops, so intercepting nvcuda is sufficient.
+16. **cudaDeviceGetAttribute must forward to cuDeviceGetAttribute**: The runtime API `cudaDeviceGetAttribute` must NOT be a stub returning 0. PyTorch queries 40+ device attributes (canMapHostMemory, concurrentKernels, sharedMemPerMultiprocessor, etc.). Returning 0 for these makes PyTorch think the GPU is broken. Forward to the driver API implementation.
+17. **cudaGetDeviceProperties must fill all fields**: PyTorch reads ~50 fields from `cudaDeviceProp`. Missing fields like `canMapHostMemory`, `concurrentKernels`, `unifiedAddressing`, `cooperativeLaunch` cause silent failures. Fill with server values or sensible modern-GPU defaults.
+18. **Python hook circular imports**: The hook MUST NOT call `import torch` during `_do_patch()` — use `sys.modules.get('torch')` instead. Also must not patch during the import chain. Use import-depth tracking: only patch when depth returns to 0 (all imports complete).
+19. **Windows DLL search order**: System32 beats PATH. On Windows, `ctypes.CDLL('nvcuda.dll')` loads from System32 first. Must load our DLL by FULL PATH (`C:\Program Files\gpushare\nvcuda.dll`) to preload it before PyTorch. Windows reuses already-loaded DLLs by base name.
+20. **MS Store Python paths**: MS Store Python uses `%LOCALAPPDATA%\Packages\PythonSoftwareFoundation.Python.*\LocalCache\local-packages\` for site-packages, NOT `Lib\site-packages` under the exe directory. Use `python -c "import site; print(site.getsitepackages())"` to discover. WindowsApps directory is read-only sandbox.
+21. **MinGW weak symbol conflicts**: MinGW on Windows doesn't support weak symbol override like GCC on Linux. If a function has both a weak stub in `generated_all_stubs.cpp` and a strong definition in `gpushare_client.cpp`, MinGW linker errors with "multiple definition". Remove the weak stub when adding a strong implementation.
 
 ## How to test
 
