@@ -25,6 +25,9 @@ import sys
 from collections import defaultdict
 
 CUDA_INCLUDE = "/opt/cuda/include"
+# Additional search paths for headers installed outside the CUDA toolkit
+# (e.g., cuDNN on Arch Linux installs to /usr/include/ via the cudnn package)
+EXTRA_INCLUDE_DIRS = ["/usr/include", "/usr/local/include", "/usr/local/cuda/include"]
 
 # Libraries to process: (name, header_files, lib_name, prefix_pattern)
 LIBRARIES = [
@@ -284,6 +287,13 @@ def main():
         funcs = []
         for h in headers:
             path = os.path.join(CUDA_INCLUDE, h)
+            if not os.path.isfile(path):
+                # Search extra include dirs (cuDNN, etc. may be installed separately)
+                for extra in EXTRA_INCLUDE_DIRS:
+                    alt = os.path.join(extra, h)
+                    if os.path.isfile(alt):
+                        path = alt
+                        break
             extracted = extract_functions(path, pattern)
             funcs.extend(extracted)
 

@@ -596,60 +596,58 @@ $hookSrc = Join-Path $ProjectDir "python\gpushare_hook.py"
 $pthSrc  = Join-Path $ProjectDir "python\gpushare.pth"
 $hookInstalled = $false
 if ((Test-Path $hookSrc) -and (Test-Path $pthSrc)) {
-    # Ask Python itself where site-packages is (works for MS Store, standard, conda, etc.)
+    # Discover site-packages by scanning the filesystem directly.
+    # Do NOT run python.exe here -- it can hang (MS Store stubs, hook loading,
+    # pip updates, etc.). Pure filesystem scan is instant and reliable.
     $siteDirs = @()
-    # On Windows, "python3" is often a MS Store stub that opens the Store app
-    # and hangs. Only use "python" (the real interpreter).
-    foreach ($pyExeName in @("python")) {
-        $pyExe = Get-Command $pyExeName -ErrorAction SilentlyContinue
-        if (-not $pyExe) { continue }
-        # Skip MS Store stubs in WindowsApps (they hang or open Store)
-        if ($pyExe.Source -match "WindowsApps") { continue }
-        try {
-            # Use Start-Process with timeout to avoid hanging
-            $tmpFile = [System.IO.Path]::GetTempFileName()
-            $proc = Start-Process -FilePath $pyExe.Source -ArgumentList "-c", "import site; print('|'.join(site.getsitepackages())); print('USER|' + site.getusersitepackages())" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $tmpFile -RedirectStandardError ([System.IO.Path]::GetTempFileName()) -ErrorAction Stop
-            if (-not $proc.WaitForExit(10000)) {
-                $proc.Kill()
-                Write-Warn "Python site-packages query timed out"
-            } elseif ($proc.ExitCode -eq 0) {
-                $lines = Get-Content $tmpFile -ErrorAction SilentlyContinue
-                foreach ($line in $lines) {
-                    if ($line -match "^USER\|(.+)$") {
-                        $siteDirs += $Matches[1].Trim()
-                    } elseif ($line.Trim() -ne "") {
-                        $siteDirs += $line.Split('|') | Where-Object { $_ -ne "" }
-                    }
-                }
-            }
-            Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
-        } catch { }
-    }
-    # Also discover from each known Python installation directly
+
+    # Standard Python installs: <python_dir>\Lib\site-packages
     foreach ($pyDir in $pythonDirs) {
-        # Skip WindowsApps stubs
         if ($pyDir -match "WindowsApps") { continue }
-        $pyExePath = Join-Path $pyDir "python.exe"
-        if (-not (Test-Path $pyExePath)) { continue }
-        try {
-            $tmpFile = [System.IO.Path]::GetTempFileName()
-            $proc = Start-Process -FilePath $pyExePath -ArgumentList "-c", "import site; print('|'.join(site.getsitepackages()))" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $tmpFile -RedirectStandardError ([System.IO.Path]::GetTempFileName()) -ErrorAction Stop
-            if ($proc.ExitCode -eq 0) {
-                $lines = Get-Content $tmpFile -ErrorAction SilentlyContinue
-                foreach ($line in $lines) {
-                    $siteDirs += $line.Split('|') | Where-Object { $_ -ne "" }
+        $sp = Join-Path $pyDir "Lib\site-packages"
+        if (Test-Path $sp) { $siteDirs += $sp }
+    }
+
+    # MS Store Python: %LOCALAPPDATA%\Packages\PythonSoftwareFoundation.Python.*\...\site-packages
+    $msStoreBase = Join-Path $env:LOCALAPPDATA "Packages"
+    if (Test-Path $msStoreBase) {
+        Get-ChildItem $msStoreBase -Filter "PythonSoftwareFoundation.Python*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $localPkgs = Join-Path $_.FullName "LocalCache\local-packages"
+            if (Test-Path $localPkgs) {
+                Get-ChildItem $localPkgs -Filter "Python*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                    $sp = Join-Path $_.FullName "site-packages"
+                    if (Test-Path $sp) { $siteDirs += $sp }
                 }
             }
-            Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
-        } catch { }
-    }
-    # Guess standard paths as fallback
-    foreach ($pyDir in $pythonDirs) {
-        $guessDir = Join-Path $pyDir "Lib\site-packages"
-        if (Test-Path $guessDir) {
-            $siteDirs += $guessDir
         }
     }
+
+    # Conda envs
+    foreach ($condaRoot in @("$env:USERPROFILE\miniconda3", "$env:USERPROFILE\anaconda3", "$env:USERPROFILE\miniforge3")) {
+        if (-not (Test-Path $condaRoot)) { continue }
+        # Base env
+        $sp = Join-Path $condaRoot "Lib\site-packages"
+        if (Test-Path $sp) { $siteDirs += $sp }
+        # Named envs
+        $envsDir = Join-Path $condaRoot "envs"
+        if (Test-Path $envsDir) {
+            Get-ChildItem $envsDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                $sp = Join-Path $_.FullName "Lib\site-packages"
+                if (Test-Path $sp) { $siteDirs += $sp }
+            }
+        }
+    }
+
+    # User site-packages (pip install --user)
+    $userSite = Join-Path $env:APPDATA "Python"
+    if (Test-Path $userSite) {
+        Get-ChildItem $userSite -Filter "Python*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $sp = Join-Path $_.FullName "site-packages"
+            if (Test-Path $sp) { $siteDirs += $sp }
+        }
+    }
+
+    $siteDirs = $siteDirs | Sort-Object -Unique
     $siteDirs = $siteDirs | Sort-Object -Unique
 
     foreach ($siteDir in $siteDirs) {
@@ -719,57 +717,18 @@ foreach ($pyDir in $pythonDirs) {
 # 1. MS Store Python's app dir is read-only (WindowsApps sandbox)
 # 2. System PATH comes AFTER System32 in DLL search order
 # 3. PyTorch adds torch\lib via os.add_dll_directory() which DOES take priority
-# Find torch\lib using multiple strategies (MS Store, standard, conda, venv)
+# Reuse $siteDirs already discovered above (pure filesystem, no python.exe calls)
 $torchLibDirs = @()
-
-# Strategy 1: Use $siteDirs from hook install (already discovered via site.getsitepackages())
-if ($siteDirs) {
-    foreach ($sd in $siteDirs) {
-        $tl = Join-Path $sd "torch\lib"
-        if (Test-Path $tl) { $torchLibDirs += $tl }
-    }
+foreach ($sd in $siteDirs) {
+    $tl = Join-Path $sd "torch\lib"
+    if (Test-Path $tl) { $torchLibDirs += $tl }
 }
-
-# Strategy 2: Ask each real Python where torch\lib is
+# Also check standard Python dir guesses
 foreach ($pyDir in $pythonDirs) {
     if ($pyDir -match "WindowsApps") { continue }
-    $pyExePath = Join-Path $pyDir "python.exe"
-    if (-not (Test-Path $pyExePath)) { continue }
-    try {
-        $tmpFile = [System.IO.Path]::GetTempFileName()
-        $proc = Start-Process -FilePath $pyExePath -ArgumentList "-c", "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $tmpFile -RedirectStandardError ([System.IO.Path]::GetTempFileName()) -ErrorAction Stop
-        if ($proc.ExitCode -eq 0) {
-            $torchOut = (Get-Content $tmpFile -ErrorAction SilentlyContinue | Select-Object -First 1)
-            if ($torchOut -and (Test-Path $torchOut.Trim())) {
-                $torchLibDirs += $torchOut.Trim()
-            }
-        }
-        Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
-    } catch { }
-}
-
-# Strategy 3: Guess standard paths
-foreach ($pyDir in $pythonDirs) {
     $guessDir = Join-Path $pyDir "Lib\site-packages\torch\lib"
     if (Test-Path $guessDir) { $torchLibDirs += $guessDir }
 }
-
-# Strategy 4: Search MS Store Python package directories
-$msStoreBase = Join-Path $env:LOCALAPPDATA "Packages"
-if (Test-Path $msStoreBase) {
-    $pyPkgs = Get-ChildItem $msStoreBase -Filter "PythonSoftwareFoundation.Python*" -Directory -ErrorAction SilentlyContinue
-    foreach ($pkg in $pyPkgs) {
-        $localPkgs = Join-Path $pkg.FullName "LocalCache\local-packages"
-        if (-not (Test-Path $localPkgs)) { continue }
-        $pyVerDirs = Get-ChildItem $localPkgs -Filter "Python*" -Directory -ErrorAction SilentlyContinue
-        foreach ($pyVer in $pyVerDirs) {
-            $tl = Join-Path $pyVer.FullName "site-packages\torch\lib"
-            if (Test-Path $tl) { $torchLibDirs += $tl }
-        }
-    }
-}
-
-# Strategy 5: Conda environments
 $condaBase = Join-Path $env:USERPROFILE "miniconda3\envs"
 if (-not (Test-Path $condaBase)) { $condaBase = Join-Path $env:USERPROFILE "anaconda3\envs" }
 if (Test-Path $condaBase) {
@@ -936,14 +895,26 @@ $hasPython    = $false
 if (-not $SkipPython) {
     Write-Step "Installing Python client..."
 
-    # Find python
-    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+    # Find a real python.exe (skip WindowsApps stubs that hang or open Store)
+    $pythonCmd = $null
+    foreach ($pyDir in $pythonDirs) {
+        if ($pyDir -match "WindowsApps") { continue }
+        $candidate = Join-Path $pyDir "python.exe"
+        if (Test-Path $candidate) {
+            $pythonCmd = Get-Item $candidate
+            break
+        }
+    }
+    # Fallback: Get-Command but skip WindowsApps
     if (-not $pythonCmd) {
-        $pythonCmd = Get-Command python3 -ErrorAction SilentlyContinue
+        $cmdResult = Get-Command python -ErrorAction SilentlyContinue
+        if ($cmdResult -and $cmdResult.Source -notmatch "WindowsApps") {
+            $pythonCmd = Get-Item $cmdResult.Source
+        }
     }
 
     if ($pythonCmd) {
-        $pythonExe  = $pythonCmd.Source
+        $pythonExe  = $pythonCmd.FullName
         $pythonwExe = Join-Path (Split-Path -Parent $pythonExe) "pythonw.exe"
         if (-not (Test-Path $pythonwExe)) { $pythonwExe = $null }
         $hasPython = $true

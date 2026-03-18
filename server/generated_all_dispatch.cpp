@@ -14,6 +14,7 @@ static void* g_lib_cublas = nullptr;
 static void* g_lib_cublasLt = nullptr;
 static void* g_lib_cuda_driver = nullptr;
 static void* g_lib_cuda_runtime = nullptr;
+static void* g_lib_cudnn = nullptr;
 static void* g_lib_cufft = nullptr;
 static void* g_lib_curand = nullptr;
 static void* g_lib_cusolverDn = nullptr;
@@ -26,6 +27,7 @@ void init_all_cuda_libs() {
     if (!g_lib_cuda_driver) g_lib_cuda_driver = dlopen("libcuda.so", RTLD_NOW | RTLD_GLOBAL);
     if (!g_lib_cublas) g_lib_cublas = dlopen("libcublas.so", RTLD_NOW | RTLD_GLOBAL);
     if (!g_lib_cublasLt) g_lib_cublasLt = dlopen("libcublasLt.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!g_lib_cudnn) g_lib_cudnn = dlopen("libcudnn.so", RTLD_NOW | RTLD_GLOBAL);
     if (!g_lib_cufft) g_lib_cufft = dlopen("libcufft.so", RTLD_NOW | RTLD_GLOBAL);
     if (!g_lib_cusparse) g_lib_cusparse = dlopen("libcusparse.so", RTLD_NOW | RTLD_GLOBAL);
     if (!g_lib_cusolverDn) g_lib_cusolverDn = dlopen("libcusolver.so", RTLD_NOW | RTLD_GLOBAL);
@@ -43,6 +45,7 @@ void* resolve_cuda_function(const char* name) {
     if (!fn && g_lib_cublasLt) fn = dlsym(g_lib_cublasLt, name);
     if (!fn && g_lib_cuda_driver) fn = dlsym(g_lib_cuda_driver, name);
     if (!fn && g_lib_cuda_runtime) fn = dlsym(g_lib_cuda_runtime, name);
+    if (!fn && g_lib_cudnn) fn = dlsym(g_lib_cudnn, name);
     if (!fn && g_lib_cufft) fn = dlsym(g_lib_cufft, name);
     if (!fn && g_lib_curand) fn = dlsym(g_lib_curand, name);
     if (!fn && g_lib_cusolverDn) fn = dlsym(g_lib_cusolverDn, name);
@@ -53,5 +56,5 @@ void* resolve_cuda_function(const char* name) {
     return fn;
 }
 
-/* Total registered functions: 2457 */
-/* Libraries: cublas, cublasLt, cuda_driver, cuda_runtime, cufft, curand, cusolverDn, cusparse, nvjpeg, nvrtc */
+/* Total registered functions: 2654 */
+/* Libraries: cublas, cublasLt, cuda_driver, cuda_runtime, cudnn, cufft, curand, cusolverDn, cusparse, nvjpeg, nvrtc */
