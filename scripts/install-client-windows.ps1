@@ -470,9 +470,31 @@ Write-Ok "Client DLL located: $clientDll"
 Write-Step "Installing to $InstallDir..."
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-# Copy base DLL
-Copy-Item -Force $clientDll "$InstallDir\gpushare_client.dll"
-Write-Ok "Installed gpushare_client.dll"
+# Copy base DLL (stop processes that may lock it)
+$trayProcs = Get-Process -Name "pythonw","python" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -match "gpu_tray|gpushare" }
+if ($trayProcs) {
+    $trayProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    Write-Info "Stopped gpushare processes to release DLL locks"
+}
+try {
+    Copy-Item -Force $clientDll "$InstallDir\gpushare_client.dll" -ErrorAction Stop
+    Write-Ok "Installed gpushare_client.dll"
+} catch {
+    Write-Warn "gpushare_client.dll is locked - trying after process cleanup..."
+    # Kill anything holding our DLLs
+    Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        try { $_.Modules | Where-Object { $_.FileName -match "gpushare" } } catch { $false }
+    } | Where-Object { $_.Id -ne $PID } | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 1000
+    try {
+        Copy-Item -Force $clientDll "$InstallDir\gpushare_client.dll" -ErrorAction Stop
+        Write-Ok "Installed gpushare_client.dll (after cleanup)"
+    } catch {
+        Write-Warn "Could not update gpushare_client.dll (still locked) - existing copy will be used"
+    }
+}
 
 # Copy MinGW runtime DLLs if the build used MinGW (needed if not statically linked)
 if ($Compiler -eq "mingw") {
@@ -542,8 +564,12 @@ $apiDlls = @(
 )
 
 foreach ($dll in $apiDlls) {
-    Copy-Item -Force "$InstallDir\gpushare_client.dll" "$InstallDir\$dll"
-    Write-Ok "  -> $dll"
+    try {
+        Copy-Item -Force "$InstallDir\gpushare_client.dll" "$InstallDir\$dll" -ErrorAction Stop
+        Write-Ok "  -> $dll"
+    } catch {
+        Write-Warn "  -> $dll (in use - existing copy will be used)"
+    }
 }
 
 # ==============================================================================
@@ -919,52 +945,29 @@ if (-not $SkipPython) {
         if (-not (Test-Path $pythonwExe)) { $pythonwExe = $null }
         $hasPython = $true
 
-        # Check pip
-        $hasPip = $false
-        try {
-            & $pythonExe -m pip --version 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) { $hasPip = $true }
-        } catch { }
-
-        $pythonPkgDir = Join-Path $ProjectDir "python"
-        if ($hasPip -and (Test-Path $pythonPkgDir)) {
-            Write-Info "Installing gpushare Python package..."
-            try {
-                # Use & operator with proper quoting (Start-Process mangles paths with spaces/parens)
-                & $pythonExe -m pip install "$pythonPkgDir" --quiet --no-warn-script-location 2>$null
-                if ($LASTEXITCODE -eq 0) {
-                    Write-Ok "Python client package installed"
-                } else {
-                    # Retry without --quiet
-                    & $pythonExe -m pip install "$pythonPkgDir" 2>$null
-                    if ($LASTEXITCODE -eq 0) {
-                        Write-Ok "Python client package installed"
-                    } else {
-                        Write-Warn "pip install failed - copying package files directly"
-                        # Direct copy fallback: copy the gpushare package to site-packages
-                        $gpusharePkg = Join-Path $pythonPkgDir "gpushare"
-                        if (Test-Path $gpusharePkg) {
-                            foreach ($sDir in $siteDirs) {
-                                if (-not (Test-Path $sDir)) { continue }
-                                $dstPkg = Join-Path $sDir "gpushare"
-                                try {
-                                    if (Test-Path $dstPkg) { Remove-Item -Recurse -Force $dstPkg }
-                                    Copy-Item -Recurse -Force $gpusharePkg $dstPkg
-                                    Write-Ok "Copied gpushare package to $sDir"
-                                } catch {
-                                    Write-Warn "Could not copy to $sDir : $_"
-                                }
-                            }
-                        }
-                    }
+        # Copy the gpushare Python package directly to site-packages.
+        # Do NOT use pip install here -- it runs python.exe which loads our hook,
+        # which tries to connect to the server, which can hang or timeout.
+        $gpusharePkg = Join-Path $ProjectDir "python\gpushare"
+        if (Test-Path $gpusharePkg) {
+            $pkgInstalled = $false
+            foreach ($sDir in $siteDirs) {
+                if (-not (Test-Path $sDir)) { continue }
+                $dstPkg = Join-Path $sDir "gpushare"
+                try {
+                    if (Test-Path $dstPkg) { Remove-Item -Recurse -Force $dstPkg }
+                    Copy-Item -Recurse -Force $gpusharePkg $dstPkg
+                    Write-Ok "Installed gpushare package to $sDir"
+                    $pkgInstalled = $true
+                } catch {
+                    Write-Warn "Could not copy to $sDir : $_"
                 }
-            } catch {
-                Write-Warn "Python client install failed (non-fatal): $_"
             }
-        } elseif (-not $hasPip) {
-            Write-Warn "pip not found -skipping Python client package"
-        } elseif (-not (Test-Path $pythonPkgDir)) {
-            Write-Warn "Python package directory not found at $pythonPkgDir -skipping"
+            if (-not $pkgInstalled) {
+                Write-Warn "Could not install gpushare package to any site-packages"
+            }
+        } else {
+            Write-Warn "Python package not found at $gpusharePkg"
         }
     } else {
         Write-Warn "Python not found in PATH -skipping Python client"
@@ -1102,13 +1105,16 @@ if (Test-Path $traySrc) {
     Copy-Item -Force $traySrc "$ShareDir\gpu_tray_windows.pyw"
     Write-Ok "GPU tray widget installed"
 
-    # Install dependencies
-    if ($hasPython) {
+    # Install dependencies (skip if no real python found - avoid hanging)
+    if ($hasPython -and $pythonExe -notmatch "WindowsApps") {
         Write-Info "Installing tray widget dependencies (pystray, pillow)..."
         try {
-            & $pythonExe -m pip install pystray pillow --quiet 2>$null
+            $env:GPUSHARE_NO_HOOK = "1"
+            & $pythonExe -m pip install pystray pillow --quiet --no-warn-script-location 2>$null
+            Remove-Item Env:\GPUSHARE_NO_HOOK -ErrorAction SilentlyContinue
             Write-Ok "pystray + pillow installed"
         } catch {
+            Remove-Item Env:\GPUSHARE_NO_HOOK -ErrorAction SilentlyContinue
             Write-Warn "Could not install pystray/pillow (tray widget optional)"
         }
     }
