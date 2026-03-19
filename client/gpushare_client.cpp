@@ -760,7 +760,10 @@ struct ServerConnection {
 
 /* ── Connection state ────────────────────────────────────── */
 static std::vector<std::unique_ptr<ServerConnection>> g_servers;
-static std::mutex g_connect_mtx;  /* protects initial connection setup */
+static std::recursive_mutex g_connect_mtx;  /* protects initial connection setup
+                                              * Must be recursive: init_local_gpu() dlopen's
+                                              * real libcudart which may dlopen our libcuda.so.1
+                                              * symlink, re-entering cuInit → ensure_connected */
 static cudaError_t  g_last_error  = cudaSuccess;
 
 /* Legacy globals — point to the active server for backward compat */
@@ -1019,7 +1022,7 @@ transport_ready:
 static bool ensure_connected() {
     if (!g_servers.empty()) return true;
 
-    std::lock_guard<std::mutex> lock(g_connect_mtx);
+    std::lock_guard<std::recursive_mutex> lock(g_connect_mtx);
     if (!g_servers.empty()) return true;  /* double-check after lock */
 
     load_config();
