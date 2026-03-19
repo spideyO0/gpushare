@@ -526,7 +526,41 @@ if [[ "${HAS_LOCAL_CUDA:-false}" == true ]] && [[ "$NO_SYMLINKS" == false ]]; th
     fi
 fi
 
-# ── 4. Create CUDA symlinks (transparent replacement) ────────────────────────
+# ── 4. Configure dynamic linker (must run BEFORE symlinks so ldconfig
+#       doesn't overwrite our symlinks with SONAME-based ones) ────────────────
+if [[ "$NO_SYMLINKS" == false ]]; then
+    info "Configuring dynamic linker..."
+
+    case "$DISTRO_FAMILY" in
+        alpine)
+            local_arch="$(uname -m)"
+            MUSL_PATH_FILE="/etc/ld-musl-${local_arch}.path"
+            if [[ -f "$MUSL_PATH_FILE" ]]; then
+                if ! grep -qxF "$LIB_DIR" "$MUSL_PATH_FILE" 2>/dev/null; then
+                    echo "$LIB_DIR" >> "$MUSL_PATH_FILE"
+                    ok "Added $LIB_DIR to $MUSL_PATH_FILE"
+                else
+                    ok "$LIB_DIR already in $MUSL_PATH_FILE"
+                fi
+            else
+                cat > "$MUSL_PATH_FILE" <<MUSLEOF
+/lib
+/usr/local/lib
+/usr/lib
+$LIB_DIR
+MUSLEOF
+                ok "Created $MUSL_PATH_FILE with $LIB_DIR"
+            fi
+            ;;
+        *)
+            echo "$LIB_DIR" > /etc/ld.so.conf.d/gpushare.conf
+            ldconfig
+            ok "ldconfig updated"
+            ;;
+    esac
+fi
+
+# ── 5. Create CUDA symlinks (transparent replacement) ────────────────────────
 if [[ "$NO_SYMLINKS" == false ]]; then
     info "Creating transparent CUDA symlinks..."
 
@@ -604,59 +638,17 @@ if [[ "$NO_SYMLINKS" == false ]]; then
         ok "All $created CUDA library symlinks created in $SYS_LIB_DIR"
     fi
 
-    # ── 5. Configure dynamic linker (distro-specific) ─────────────────────────
-    info "Configuring dynamic linker..."
-
-    case "$DISTRO_FAMILY" in
-        alpine)
-            # Alpine uses musl libc — no /etc/ld.so.conf.d support
-            # musl uses /etc/ld-musl-<arch>.path
-            local_arch="$(uname -m)"
-            MUSL_PATH_FILE="/etc/ld-musl-${local_arch}.path"
-            if [[ -f "$MUSL_PATH_FILE" ]]; then
-                if ! grep -qxF "$LIB_DIR" "$MUSL_PATH_FILE" 2>/dev/null; then
-                    echo "$LIB_DIR" >> "$MUSL_PATH_FILE"
-                    ok "Added $LIB_DIR to $MUSL_PATH_FILE"
-                else
-                    ok "$LIB_DIR already in $MUSL_PATH_FILE"
-                fi
-            else
-                # Create the path file with default paths + ours
-                cat > "$MUSL_PATH_FILE" <<MUSLEOF
-/lib
-/usr/local/lib
-/usr/lib
-$LIB_DIR
-MUSLEOF
-                ok "Created $MUSL_PATH_FILE with $LIB_DIR"
-            fi
-            ;;
-        *)
-            # Standard glibc distros: update ldconfig cache
-            echo "$LIB_DIR" > /etc/ld.so.conf.d/gpushare.conf
-            ldconfig
-            ok "ldconfig updated"
-
-            # Verify the critical library resolves correctly
-            resolved=$(ldconfig -p 2>/dev/null | grep "libcuda.so.1 " | head -1 || true)
-            if echo "$resolved" | grep -q gpushare; then
-                ok "Verified: libcuda.so.1 resolves to gpushare"
-            else
-                # Symlinks in /usr/lib are found by the dynamic linker even without
-                # ldconfig cache entries (it's a hardcoded default search path)
-                if [[ -L "$SYS_LIB_DIR/libcuda.so.1" ]]; then
-                    target_check=$(readlink -f "$SYS_LIB_DIR/libcuda.so.1" 2>/dev/null || true)
-                    if [[ "$target_check" == *gpushare* ]]; then
-                        ok "Verified: $SYS_LIB_DIR/libcuda.so.1 -> gpushare (via default path)"
-                    else
-                        warn "libcuda.so.1 in $SYS_LIB_DIR does not point to gpushare"
-                    fi
-                else
-                    warn "libcuda.so.1 symlink not found in $SYS_LIB_DIR"
-                fi
-            fi
-            ;;
-    esac
+    # Verify the critical symlink resolves correctly
+    if [[ -L "$SYS_LIB_DIR/libcuda.so.1" ]]; then
+        target_check=$(readlink -f "$SYS_LIB_DIR/libcuda.so.1" 2>/dev/null || true)
+        if [[ "$target_check" == *gpushare* ]]; then
+            ok "Verified: $SYS_LIB_DIR/libcuda.so.1 -> gpushare"
+        else
+            warn "libcuda.so.1 in $SYS_LIB_DIR does not point to gpushare"
+        fi
+    else
+        warn "libcuda.so.1 symlink not found in $SYS_LIB_DIR"
+    fi
 else
     info "Skipping CUDA symlinks (--no-symlinks)"
     info "Set LD_LIBRARY_PATH=$LIB_DIR before your CUDA application to use gpushare."
