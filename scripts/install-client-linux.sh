@@ -667,12 +667,23 @@ info "Installing client configuration..."
 mkdir -p "$CONF_DIR"
 
 if [[ "$IS_UPGRADE" == true ]] && [[ -f "$CONF_DIR/client.conf" ]]; then
-    # On upgrade, preserve existing config; install new default as reference
-    warn "Config already exists at $CONF_DIR/client.conf — not overwriting"
-    install -Dm644 "$PROJECT_DIR/config/gpushare-client.conf" "$CONF_DIR/client.conf.new"
-    info "New default written to $CONF_DIR/client.conf.new for reference"
-    # Read server address from existing config for summary
-    SERVER_ADDR=$(grep -oP '^server=\K.*' "$CONF_DIR/client.conf" 2>/dev/null || echo "unknown")
+    # On upgrade, update server address and remote_first if requested
+    if [[ -z "$SERVER_ADDR" ]]; then
+        current=$(grep -oP '^server=\K.*' "$CONF_DIR/client.conf" 2>/dev/null || echo "")
+        read -rp "Server address [${current:-192.168.1.100:9847}]: " SERVER_ADDR
+        SERVER_ADDR="${SERVER_ADDR:-${current:-192.168.1.100:9847}}"
+    fi
+    sed -i "s|^server=.*|server=$SERVER_ADDR|" "$CONF_DIR/client.conf"
+    if [[ "$REMOTE_FIRST" == true ]]; then
+        if grep -q '^remote_first=' "$CONF_DIR/client.conf"; then
+            sed -i "s|^remote_first=.*|remote_first=true|" "$CONF_DIR/client.conf"
+        elif grep -q '^# remote_first=' "$CONF_DIR/client.conf"; then
+            sed -i "s|^# remote_first=.*|remote_first=true|" "$CONF_DIR/client.conf"
+        else
+            echo "remote_first=true" >> "$CONF_DIR/client.conf"
+        fi
+    fi
+    ok "Config updated: $CONF_DIR/client.conf (server=$SERVER_ADDR)"
 else
     # Fresh install — prompt for server address
     if [[ -z "$SERVER_ADDR" ]]; then
