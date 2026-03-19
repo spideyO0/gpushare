@@ -566,11 +566,11 @@ if [[ "$NO_SYMLINKS" == false ]]; then
 
     # Create symlinks in the SYSTEM library directory so the dynamic linker
     # can actually find them. These point to the absolute path of our library.
-    local target="$LIB_DIR/libgpushare_client.so"
-    local created=0
-    local skipped=0
+    target="$LIB_DIR/libgpushare_client.so"
+    created=0
+    skipped=0
     for link in "${CUDA_SYMLINKS[@]}"; do
-        local sys_path="$SYS_LIB_DIR/$link"
+        sys_path="$SYS_LIB_DIR/$link"
         # Back up any existing real CUDA library before overriding
         if [[ -e "$sys_path" ]] && [[ ! -L "$sys_path" ]]; then
             # It's a real file (not a symlink) — back it up
@@ -580,7 +580,6 @@ if [[ "$NO_SYMLINKS" == false ]]; then
                 info "Backed up $sys_path to $LIB_DIR/real/$link"
             fi
         elif [[ -L "$sys_path" ]]; then
-            local existing_target
             existing_target=$(readlink -f "$sys_path" 2>/dev/null || true)
             if [[ "$existing_target" == *gpushare* ]]; then
                 skipped=$((skipped + 1))
