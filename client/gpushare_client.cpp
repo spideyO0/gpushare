@@ -2035,7 +2035,38 @@ GPUSHARE_EXPORT CUresult cuInit(unsigned int flags) {
 }
 
 GPUSHARE_EXPORT CUresult cuDriverGetVersion(int *version) {
-    if (version) *version = 13010;  /* Report CUDA 13.1 */
+    if (!version) return CUDA_ERROR_INVALID_VALUE;
+
+    /* Query real local driver version if available.
+     * PyTorch checks this against its compiled CUDA version — reporting a
+     * version that doesn't match the local driver causes "driver too old"
+     * or "driver too new" errors. */
+#ifdef _WIN32
+    /* Windows: try real nvcuda.dll cuDriverGetVersion via GetProcAddress */
+    if (g_local.h_cuda) {
+        typedef CUresult (*pfn_cuDriverGetVersion)(int*);
+        pfn_cuDriverGetVersion real_fn = (pfn_cuDriverGetVersion)
+            GetProcAddress((HMODULE)g_local.h_cuda, "cuDriverGetVersion");
+        if (real_fn) {
+            CUresult r = real_fn(version);
+            if (r == CUDA_SUCCESS) return CUDA_SUCCESS;
+        }
+    }
+#else
+    /* Linux/macOS: try real libcuda.so.1 cuDriverGetVersion via dlsym */
+    if (g_local.h_cuda) {
+        typedef CUresult (*pfn_cuDriverGetVersion)(int*);
+        pfn_cuDriverGetVersion real_fn = (pfn_cuDriverGetVersion)
+            dlsym(g_local.h_cuda, "cuDriverGetVersion");
+        if (real_fn) {
+            CUresult r = real_fn(version);
+            if (r == CUDA_SUCCESS) return CUDA_SUCCESS;
+        }
+    }
+#endif
+
+    /* No local driver — report server CUDA version */
+    *version = 13010;
     return CUDA_SUCCESS;
 }
 
