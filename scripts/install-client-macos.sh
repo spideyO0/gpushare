@@ -148,6 +148,7 @@ if [[ "$SKIP_BUILD" == false ]]; then
             cudaEventRecordWithFlags cudaStreamGetPriority cudaMemcpy2DAsync
             cudaGetDriverEntryPoint cudaGetDriverEntryPointByVersion
             cudaGetDeviceProperties_v2
+            cudaThreadExchangeStreamCaptureMode
         )
         stub_removed=false
         for stub in "${CONFLICTING_STUBS[@]}"; do

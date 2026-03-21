@@ -408,7 +408,8 @@ if ($Compiler -eq "prebuilt" -and $NeedDownload) {
             "cudaIpcGetEventHandle", "cudaIpcOpenEventHandle", "cudaMemcpyToSymbol",
             "cudaEventRecordWithFlags", "cudaStreamGetPriority", "cudaMemcpy2DAsync",
             "cudaGetDriverEntryPoint", "cudaGetDriverEntryPointByVersion",
-            "cudaGetDeviceProperties_v2"
+            "cudaGetDeviceProperties_v2",
+        "cudaThreadExchangeStreamCaptureMode"
         )
         foreach ($funcName in $conflictingStubs) {
             $escaped = [regex]::Escape($funcName) + '\(\)'

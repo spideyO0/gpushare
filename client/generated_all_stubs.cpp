@@ -258,7 +258,6 @@ STUB_EXPORT int WEAK_SYM cudaStreamGetFlags() { return 0; }
 STUB_EXPORT int WEAK_SYM cudaStreamGetId() { return 0; }
 STUB_EXPORT int WEAK_SYM cudaStreamSetAttribute() { return 0; }
 STUB_EXPORT int WEAK_SYM cudaStreamUpdateCaptureDependencies() { return 0; }
-STUB_EXPORT int WEAK_SYM cudaThreadExchangeStreamCaptureMode() { return 0; }
 STUB_EXPORT int WEAK_SYM cudaUserObjectCreate() { return 0; }
 STUB_EXPORT int WEAK_SYM cudaUserObjectRelease() { return 0; }
 STUB_EXPORT int WEAK_SYM cudaUserObjectRetain() { return 0; }
