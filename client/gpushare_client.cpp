@@ -1183,6 +1183,11 @@ static bool ensure_connected() {
     if (!g_servers.empty()) return true;  /* double-check after lock */
 
     load_config();
+
+    /* Re-check: on Windows, load_config() → init_local_gpu() → real cudart →
+     * cuInit() re-enters ensure_connected() and may have already connected. */
+    if (!g_servers.empty()) return true;
+
     sock_init();
 
     /* If no servers configured, use default */
