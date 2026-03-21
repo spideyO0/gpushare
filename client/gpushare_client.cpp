@@ -30,6 +30,7 @@
 /* Platform-specific networking */
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
+  #define NOMINMAX  /* prevent windows.h min/max macros conflicting with std::min/std::max */
   #include <winsock2.h>
   #include <ws2tcpip.h>
   #pragma comment(lib, "ws2_32.lib")
@@ -255,15 +256,17 @@ static std::string g_real_cuda_path = REAL_CUDA_DEFAULT_PATH;
 static std::string g_transport_type = "tcp";  /* Phase 9: "tcp" or "rdma" */
 static bool g_local_initialized = false;
 
+#ifndef _WIN32
 /* Activate the CUDA context for a local device. Must be called before any
- * driver API operation on a local GPU. */
+ * driver API operation on a local GPU. Linux only — uses driver API contexts. */
 static CUresult local_set_ctx(int local_dev) {
     if (local_dev < 0 || local_dev >= g_local.local_count) return CUDA_ERROR_INVALID_DEVICE;
     if (!g_local.CtxSetCurrent || !g_local.contexts[local_dev]) return CUDA_ERROR_NOT_INITIALIZED;
     return g_local.CtxSetCurrent(g_local.contexts[local_dev]);
 }
 
-/* Fill a cudaDeviceProp struct from driver API queries for a local device */
+/* Fill a cudaDeviceProp struct from driver API queries for a local device.
+ * Linux only — Windows uses the runtime API (g_local.GetDeviceProperties). */
 static cudaError_t local_get_device_props(struct cudaDeviceProp *prop, int local_dev) {
     if (!prop || !g_local.DeviceGetAttribute) return cudaErrorInvalidValue;
     memset(prop, 0, sizeof(*prop));
@@ -320,6 +323,7 @@ static cudaError_t local_get_device_props(struct cudaDeviceProp *prop, int local
 
     return cudaSuccess;
 }
+#endif /* !_WIN32 */
 
 static bool is_remote_device(int dev) {
     if (!g_local.available || g_gpu_mode == "remote") return true;
