@@ -530,8 +530,9 @@ def _do_patch():
     # ── 4. device_count — correct count ──
     _orig_device_count = tc.device_count
     def _patched_device_count():
-        c = _orig_device_count()
-        return max(c, _device_count)
+        if _device_count > 0:
+            return _device_count
+        return _orig_device_count()
     tc.device_count = _patched_device_count
 
     # ── 5. get_device_capability — ctypes fallback ──
@@ -547,33 +548,33 @@ def _do_patch():
                 return (0, 0)
         tc.get_device_capability = _patched_get_device_capability
 
-    # ── 6. get_device_name — strip " (remote)" / " (local)" ──
+    # ── 6. get_device_name — use gpushare data first, original as fallback ──
     if hasattr(tc, 'get_device_name'):
         _orig_get_name = tc.get_device_name
         def _patched_get_device_name(device=None):
+            idx = _resolve_device(device)
+            if 0 <= idx < len(_devices):
+                return _devices[idx]['name']
             try:
                 n = _orig_get_name(device)
                 return n.replace(' (remote)', '').replace(' (local)', '')
             except Exception:
-                idx = _resolve_device(device)
-                if 0 <= idx < len(_devices):
-                    return _devices[idx]['name']
                 return 'Unknown GPU'
         tc.get_device_name = _patched_get_device_name
 
-    # ── 7. get_device_properties — clean name + fallback ──
+    # ── 7. get_device_properties — use gpushare data first, original as fallback ──
     if hasattr(tc, 'get_device_properties'):
         _orig_get_props = tc.get_device_properties
         def _patched_get_device_properties(device=None):
+            idx = _resolve_device(device)
+            if 0 <= idx < len(_devices):
+                return _DeviceProps(_devices[idx])
             try:
                 p = _orig_get_props(device)
                 if hasattr(p, 'name') and (' (remote)' in p.name or ' (local)' in p.name):
                     return _CleanNameProps(p)
                 return p
             except Exception:
-                idx = _resolve_device(device)
-                if 0 <= idx < len(_devices):
-                    return _DeviceProps(_devices[idx])
                 raise
         tc.get_device_properties = _patched_get_device_properties
 
@@ -606,31 +607,37 @@ def _do_patch():
         tc.memory_allocated = _patched_memory_allocated
 
     # ── 10. _lazy_init — recover from initialization failures ──
+    # On Windows with dual-GPU (local + remote), torch._C._cuda_init() can
+    # hang because the bundled cudart calls cuInit through our nvcuda.dll,
+    # creating a re-entrant initialization chain. When gpushare has already
+    # discovered GPUs, skip the C++ init and mark as initialized directly.
     if hasattr(tc, '_lazy_init'):
         _orig_lazy_init = tc._lazy_init
         _init_done = [False]
         def _patched_lazy_init():
             if _init_done[0]:
                 return
+            if _device_count > 0:
+                # gpushare already discovered GPUs — mark initialized without
+                # calling torch._C._cuda_init() (which can hang on Windows)
+                _init_done[0] = True
+                if hasattr(tc, '_initialized'):
+                    tc._initialized = True
+                if hasattr(tc, '_queued_calls'):
+                    for fn_and_args in tc._queued_calls:
+                        if callable(fn_and_args):
+                            try: fn_and_args()
+                            except Exception: pass
+                        elif isinstance(fn_and_args, (tuple, list)) and len(fn_and_args) >= 1:
+                            try: fn_and_args[0](*fn_and_args[1:])
+                            except Exception: pass
+                    tc._queued_calls = []
+                return
             try:
                 _orig_lazy_init()
                 _init_done[0] = True
             except Exception:
-                if _device_count > 0:
-                    _init_done[0] = True
-                    if hasattr(tc, '_initialized'):
-                        tc._initialized = True
-                    if hasattr(tc, '_queued_calls'):
-                        for fn_and_args in tc._queued_calls:
-                            if callable(fn_and_args):
-                                try: fn_and_args()
-                                except Exception: pass
-                            elif isinstance(fn_and_args, (tuple, list)) and len(fn_and_args) >= 1:
-                                try: fn_and_args[0](*fn_and_args[1:])
-                                except Exception: pass
-                        tc._queued_calls = []
-                else:
-                    raise
+                raise
         tc._lazy_init = _patched_lazy_init
 
     # ── 11. Suppress SM compatibility warnings ──
