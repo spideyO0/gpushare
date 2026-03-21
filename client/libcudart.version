@@ -1,0 +1,6 @@
+/* Version script: export all symbols under the libcudart.so.12 version tag.
+ * This allows our library to satisfy torch's versioned symbol requirements
+ * when loaded as libcudart.so.12 (via symlink). */
+libcudart.so.12 {
+    global: *;
+};

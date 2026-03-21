@@ -132,6 +132,35 @@ if [[ "$SKIP_BUILD" == false ]]; then
             mkdir -p "$BUILD_DIR"
         fi
     fi
+    # Remove weak stubs that conflict with strong implementations.
+    all_stubs="$PROJECT_DIR/client/generated_all_stubs.cpp"
+    if [[ -f "$all_stubs" ]]; then
+        CONFLICTING_STUBS=(
+            cuGetProcAddress cuGetProcAddress_v2
+            cudaLaunchKernel cudaHostAlloc cudaHostRegister cudaHostUnregister
+            cudaMemcpyPeerAsync cudaFuncSetAttribute cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags
+            cudaLaunchKernelExC cudaDeviceGetPCIBusId cudaLaunchHostFunc
+            cudaStreamBeginCapture cudaStreamEndCapture cudaStreamIsCapturing
+            cudaGraphInstantiateWithFlags cudaGraphGetNodes cudaGraphDebugDotPrint
+            cudaGraphNodeGetDependencies cudaMemPoolSetAttribute cudaMemPoolGetAttribute
+            cudaMemPoolSetAccess cudaIpcGetMemHandle cudaIpcOpenMemHandle cudaIpcCloseMemHandle
+            cudaIpcGetEventHandle cudaIpcOpenEventHandle cudaMemcpyToSymbol
+            cudaEventRecordWithFlags cudaStreamGetPriority cudaMemcpy2DAsync
+            cudaGetDriverEntryPoint cudaGetDriverEntryPointByVersion
+            cudaGetDeviceProperties_v2
+        )
+        stub_removed=false
+        for stub in "${CONFLICTING_STUBS[@]}"; do
+            if grep -q "WEAK_SYM ${stub}()" "$all_stubs" 2>/dev/null; then
+                sed -i '' "/STUB_EXPORT int WEAK_SYM ${stub}() /d" "$all_stubs"
+                stub_removed=true
+            fi
+        done
+        if [[ "$stub_removed" == true ]]; then
+            info "Removed conflicting weak stubs from generated_all_stubs.cpp"
+        fi
+    fi
+
     cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SERVER=OFF \

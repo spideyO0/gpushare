@@ -14,7 +14,7 @@ Share your NVIDIA GPU with any machine on your network. Applications on client m
 
 One library (`libgpushare_client`) installs as every CUDA library on the client. Applications load it thinking it's the real NVIDIA stack, and all GPU operations are transparently forwarded to the server over TCP.
 
-- **2,600+ exported API functions** across 12 CUDA libraries
+- **2,800+ exported API functions** across 12 CUDA libraries
 - **Zero code changes** — any CUDA application works as-is
 - **Cross-platform** — Linux, macOS, Windows clients
 - **No LD_PRELOAD** — system-wide interception via library symlinks
@@ -127,6 +127,8 @@ x = torch.randn(1000, device='cuda:1')  # tensor on remote GPU
 
 The hook uses two-phase discovery: first via ctypes to the loaded CUDA library, then via TCP fallback to the gpushare server. On Windows with a local GPU, `nvcuda.dll` in `torch\lib` provides the CUDA driver interception while PyTorch's bundled `cudart64_*.dll` is preserved intact (it has internal functions that `c10_cuda.dll` needs).
 
+On Linux, the install script also replaces PyTorch's bundled `libcudart.so.12` in site-packages to prevent RPATH conflicts (PyTorch's `libc10_cuda.so` uses `DT_RPATH` which is searched before `LD_LIBRARY_PATH`). This works because our library exports versioned symbols (`@@libcudart.so.12`) including internal functions like `__cudaRegisterFatBinary`, `__cudaRegisterFunction`, and `__cudaPushCallConfiguration` via a linker version script.
+
 All discovery has timeouts (5s ctypes, 3s TCP) so Python startup never hangs even if the server is unreachable.
 
 ### Remote Priority Mode
@@ -151,7 +153,7 @@ This is the most robust way to ensure applications like PyTorch "pick up" the po
 
 | Library | Functions | Full RPC | Notes |
 |---|---|---|---|
-| CUDA Runtime | 334 | 61 | cudaMalloc, cudaMemcpy, streams, events, graphs |
+| CUDA Runtime | ~420 | ~150 | cudaMalloc, cudaMemcpy, streams, events, graphs, memory pools, IPC |
 | CUDA Driver | 521 | 56 | cuInit, cuMemAlloc, cuLaunchKernel, contexts |
 | NVML | 29 | 29 | Full GPU monitoring (temp, power, VRAM, util) |
 | cuBLAS | 598 | 33 | SGEMM, DGEMM, GemmEx, strided batched |
@@ -163,7 +165,7 @@ This is the most robust way to ensure applications like PyTorch "pick up" the po
 | cuRAND | 29 | — | Random number generation |
 | NVRTC | 25 | — | Runtime compilation |
 | nvJPEG | 81 | — | JPEG decode |
-| **Total** | **2,600+** | **133** | |
+| **Total** | **2,800+** | **133** | |
 
 "Full RPC" = proper argument serialization, data forwarded to server, results returned.
 "—" = exported symbol for link compatibility, returns success. Add full RPC support by adding the function to `codegen/generate_stubs.py`.
@@ -272,6 +274,7 @@ gpushare/
 ├── client/gpushare_client.cpp        # Client library (runtime + driver + NVML)
 ├── client/generated_stubs.cpp        # Auto-generated cuBLAS/cuDNN RPC stubs
 ├── client/generated_all_stubs.cpp    # Auto-generated weak stubs (all libraries)
+├── client/libcudart.version          # Linker version script (@@libcudart.so.12)
 ├── include/gpushare/
 │   ├── protocol.h                    # Wire protocol definitions
 │   └── cuda_defs.h                   # CUDA/NVML types (no CUDA toolkit needed)
@@ -308,7 +311,7 @@ gpushare/
 - **CUDA compute only** — graphics APIs (DirectX, Vulkan, OpenGL) are not supported. Blender rendering, games, and Photoshop GPU acceleration require a local GPU or a streaming solution (Sunshine/Moonlight).
 - **1 Gbps bandwidth limit** — large data transfers (>100 MB) are bottlenecked by the network. Chunked pipelining helps saturate the link by overlapping network I/O with GPU DMA, but the physical limit remains. For training, keep data on the server side.
 - **PyTorch on macOS** — Apple's PyTorch builds are CPU-only (CUDA compiled out). Use the gpushare Python API directly for ML on Mac.
-- **Windows with local GPU** — `nvcuda.dll` in System32 is locked by the NVIDIA driver, but gpushare overrides it by placing our DLL in `torch\lib` (PyTorch adds this via `os.add_dll_directory()`). Only `nvcuda.dll` is replaced in torch\lib; `cudart64_*.dll` must NOT be replaced (c10_cuda.dll needs internal CUDA runtime functions our DLL doesn't export). The C library routes device 0 to local GPU via backed-up real DLLs, device 1+ to remote server.
+- **Windows with local GPU** — `nvcuda.dll` in System32 is locked by the NVIDIA driver, but gpushare overrides it by placing our DLL in `torch\lib` (PyTorch adds this via `os.add_dll_directory()`). Only `nvcuda.dll` is replaced in torch\lib; `cudart64_*.dll` must NOT be replaced on Windows (c10_cuda.dll needs internal CUDA runtime functions, and Windows DLLs don't carry Linux-style ELF version tags). On Linux, we CAN replace `libcudart.so.12` because our library exports the `__cuda*` internal symbols (`__cudaRegisterFatBinary`, `__cudaRegisterFunction`, etc.) with proper ELF versioning (`@@libcudart.so.12`) via a linker version script. The C library routes device 0 to local GPU via backed-up real DLLs, device 1+ to remote server.
 - **Windows Task Manager** — cannot show remote GPUs (requires kernel-mode WDDM driver). Use nvidia-smi or the tray widget instead.
 
 ## License

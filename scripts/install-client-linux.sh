@@ -437,9 +437,28 @@ if [[ "$SKIP_BUILD" == false ]]; then
     # and causes "multiple definition" linker errors.
     all_stubs="$PROJECT_DIR/client/generated_all_stubs.cpp"
     if [[ -f "$all_stubs" ]]; then
-        if grep -q 'WEAK_SYM cuGetProcAddress()' "$all_stubs" 2>/dev/null; then
-            sed -i '/STUB_EXPORT int WEAK_SYM cuGetProcAddress() /d' "$all_stubs"
-            sed -i '/STUB_EXPORT int WEAK_SYM cuGetProcAddress_v2() /d' "$all_stubs"
+        CONFLICTING_STUBS=(
+            cuGetProcAddress cuGetProcAddress_v2
+            cudaLaunchKernel cudaHostAlloc cudaHostRegister cudaHostUnregister
+            cudaMemcpyPeerAsync cudaFuncSetAttribute cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags
+            cudaLaunchKernelExC cudaDeviceGetPCIBusId cudaLaunchHostFunc
+            cudaStreamBeginCapture cudaStreamEndCapture cudaStreamIsCapturing
+            cudaGraphInstantiateWithFlags cudaGraphGetNodes cudaGraphDebugDotPrint
+            cudaGraphNodeGetDependencies cudaMemPoolSetAttribute cudaMemPoolGetAttribute
+            cudaMemPoolSetAccess cudaIpcGetMemHandle cudaIpcOpenMemHandle cudaIpcCloseMemHandle
+            cudaIpcGetEventHandle cudaIpcOpenEventHandle cudaMemcpyToSymbol
+            cudaEventRecordWithFlags cudaStreamGetPriority cudaMemcpy2DAsync
+            cudaGetDriverEntryPoint cudaGetDriverEntryPointByVersion
+            cudaGetDeviceProperties_v2
+        )
+        stub_removed=false
+        for stub in "${CONFLICTING_STUBS[@]}"; do
+            if grep -q "WEAK_SYM ${stub}()" "$all_stubs" 2>/dev/null; then
+                sed -i "/STUB_EXPORT int WEAK_SYM ${stub}() /d" "$all_stubs"
+                stub_removed=true
+            fi
+        done
+        if [[ "$stub_removed" == true ]]; then
             info "Removed conflicting weak stubs from generated_all_stubs.cpp"
         fi
     fi
@@ -779,6 +798,58 @@ if [[ "$SKIP_PYTHON" == false ]]; then
     fi
 else
     info "Skipping Python client (--skip-python)"
+fi
+
+# ── 8b. Replace torch's bundled libcudart.so.12 ──────────────────────────────
+# PyTorch bundles its own CUDA runtime (libcudart.so.12) in site-packages.
+# Its RPATH loads this BEFORE our system symlinks, causing conflicts.
+# Our library now exports all required versioned symbols (@@libcudart.so.12),
+# including __cudaRegisterFatBinary etc., so it can serve as a drop-in.
+if [[ "$NO_SYMLINKS" == false ]] && [[ "$LIB_UPDATED" == true || "$FORCE_REINSTALL" == true ]]; then
+    info "Checking for PyTorch bundled CUDA runtime..."
+    TORCH_CUDART_REPLACED=0
+
+    # Search all Python site-packages for torch's bundled libcudart.so.12
+    for sp_dir in /usr/lib/python*/site-packages /usr/local/lib/python*/site-packages /usr/lib/python*/dist-packages /usr/local/lib/python*/dist-packages; do
+        torch_cudart="$sp_dir/nvidia/cuda_runtime/lib/libcudart.so.12"
+        if [[ -f "$torch_cudart" ]]; then
+            # Check if it's already our library
+            if nm -D "$torch_cudart" 2>/dev/null | grep -q '__cudaRegisterFatBinary'; then
+                info "  $torch_cudart already replaced — skipping"
+                continue
+            fi
+            # Back up the original
+            if [[ ! -f "${torch_cudart}.real" ]]; then
+                cp "$torch_cudart" "${torch_cudart}.real"
+                info "  Backed up original: ${torch_cudart}.real"
+            fi
+            cp "$LIB_DIR/libgpushare_client.so" "$torch_cudart"
+            TORCH_CUDART_REPLACED=$((TORCH_CUDART_REPLACED + 1))
+            ok "  Replaced: $torch_cudart"
+        fi
+    done
+
+    # Also check venvs and conda environments in common locations
+    for venv_dir in /home/*/venv /home/*/.venv /home/*/miniconda3/envs/*/lib/python*/site-packages /home/*/anaconda3/envs/*/lib/python*/site-packages; do
+        torch_cudart="$venv_dir/nvidia/cuda_runtime/lib/libcudart.so.12"
+        # Only check paths that actually exist (glob may not match)
+        [[ -f "$torch_cudart" ]] || continue
+        if nm -D "$torch_cudart" 2>/dev/null | grep -q '__cudaRegisterFatBinary'; then
+            continue
+        fi
+        if [[ ! -f "${torch_cudart}.real" ]]; then
+            cp "$torch_cudart" "${torch_cudart}.real"
+        fi
+        cp "$LIB_DIR/libgpushare_client.so" "$torch_cudart"
+        TORCH_CUDART_REPLACED=$((TORCH_CUDART_REPLACED + 1))
+        ok "  Replaced: $torch_cudart"
+    done
+
+    if [[ $TORCH_CUDART_REPLACED -gt 0 ]]; then
+        ok "Replaced $TORCH_CUDART_REPLACED PyTorch bundled libcudart.so.12 with gpushare"
+    else
+        info "No PyTorch installations found (non-fatal)"
+    fi
 fi
 
 # ── 9. Systemd user service for dashboard ────────────────────────────────────

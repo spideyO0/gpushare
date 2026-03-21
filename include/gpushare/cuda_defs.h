@@ -27,7 +27,11 @@ typedef enum {
     cudaErrorInsufficientDriver    = 35,
     cudaErrorNoDevice              = 100,
     cudaErrorInvalidDevicePointer  = 700,
+    cudaErrorInvalidSymbol         = 13,
     cudaErrorNotReady              = 600,
+    cudaErrorNotFound              = 500,
+    cudaErrorNotSupported          = 801,
+    cudaErrorStreamCaptureUnsupported = 900,
     cudaErrorUnknown               = 999,
 } cudaError_t;
 

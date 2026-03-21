@@ -33,6 +33,10 @@ gpushare shares an NVIDIA GPU over a TCP network. One server machine (Arch Linux
 - **Pipelined RPC architecture**: replaced single `g_sock_mtx` with `g_send_mtx` (send-only lock) and a dedicated `recv_thread` that dispatches responses by `req_id` via `promise`/`future` through a `g_pending` map. Multiple threads can have concurrent in-flight RPCs.
 - Stores `g_server_caps` from INIT handshake. Uses async opcodes when `GS_CAP_ASYNC` is set, chunked transfers when `GS_CAP_CHUNKED` is set, falls back to sync single-message path for old servers.
 - Windows `DllMain` uses `detach()` instead of `join()` on the recv thread during process exit to avoid loader lock deadlock
+- Linux cleanup (`__attribute__((destructor))`) also uses `detach()` instead of `join()` for recv threads, wrapped in `try/catch`, to avoid crashes during static destruction
+- `-Wl,-Bsymbolic` linker flag prevents PLT interposition (internal `cudaXxx` calls resolve to our own symbols, not PyTorch's bundled `libcudart.so.12`)
+- Version script (`client/libcudart.version`) tags exports with `@@libcudart.so.12` for drop-in CUDA runtime replacement
+- Exports `__cudaRegisterFatBinary`, `__cudaRegisterFunction`, `__cudaPushCallConfiguration`, `cudaLaunchKernel`, `cudaHostAlloc`, stream capture, graph API, memory pools, IPC stubs (~90 new runtime API exports)
 
 **Generated stubs — two tiers:**
 1. `client/generated_stubs.cpp` + `server/generated_dispatch.cpp` (from `codegen/generate_stubs.py`):
@@ -43,12 +47,12 @@ gpushare shares an NVIDIA GPU over a TCP network. One server machine (Arch Linux
    - Each arg has a kind: SCALAR, DEV_PTR, HANDLE, HANDLE_OUT, HOST_IN, HOST_OUT
 
 2. `client/generated_all_stubs.cpp` + `server/generated_all_dispatch.cpp` (from `codegen/parse_headers.py`):
-   - 2,432 weak symbol stubs parsed from actual CUDA headers in /opt/cuda/include/
+   - ~2,420 weak symbol stubs parsed from actual CUDA headers in /opt/cuda/include/ (after removing ~33 that conflict with strong definitions)
    - Ensures applications can LINK against our library for every CUDA symbol
    - Weak symbols get overridden by tier-1 full-RPC functions
    - Server has a dlsym-based resolver for all libraries
 
-**Total: 2,600+ exported functions across 12 CUDA libraries.**
+**Total: 2,800+ exported functions across 12 CUDA libraries (292 strong + ~2,420 weak with versioned tags).**
 
 ### Protocol (`include/gpushare/protocol.h`)
 
@@ -92,7 +96,7 @@ All structs use `PACKED_STRUCT_BEGIN`/`PACKED_STRUCT_END` macros for MSVC portab
 All scripts support: `--force` (full reinstall), upgrade detection (IS_UPGRADE), config preservation, stale CMake cache cleaning.
 
 - `install-server-arch.sh`: Arch Linux server setup, systemd services, codegen step, firewall, creates CUDA symlinks in `/usr/local/lib/gpushare/` (reference only, real CUDA keeps priority on server), backs up real libs, installs client.conf for dual-GPU support on the server machine itself
-- `install-client-linux.sh`: 9 distro families auto-detected, auto-installs deps, SELinux/AppArmor handling, creates symlinks in `/usr/lib/` (system library dir, found by dynamic linker) + installs Python startup hook to site-packages
+- `install-client-linux.sh`: 9 distro families auto-detected, auto-installs deps, SELinux/AppArmor handling, creates symlinks in `/usr/lib/` (system library dir, found by dynamic linker) + installs Python startup hook to site-packages + replaces PyTorch's bundled `libcudart.so.12` in site-packages with our library + removes 33 conflicting weak stubs before building
 - `install-client-macos.sh`: Homebrew deps, quarantine clearing on ALL files, launchd plist, SIP-safe shebangs, installs Python startup hook to site-packages
 - `install-client-windows.ps1`: VS/MinGW/MSYS2 auto-detect, always installs DLL overrides (even with local GPU), copies nvcuda.dll into torch\lib (critical: only nvcuda.dll, NOT cudart64_*.dll), registry GPU adapter, Defender exclusion, backs up real CUDA DLLs to `C:\Program Files\gpushare\real\`, installs Python hook via `site.getsitepackages()` (works for MS Store Python), handles `--force` in both `-Force` and `--force` styles
 - `uninstall.sh`: Cross-platform (Linux/macOS), dry-run support, removes symlinks from `/usr/lib/`, removes Python hook from all site-packages
@@ -128,8 +132,13 @@ All scripts support: `--force` (full reinstall), upgrade detection (IS_UPGRADE),
 L128- 26. **Remote Indexing and Prioritization**: If `remote_first` is enabled, the device mapping changes globally. All functions (`cudaSetDevice`, `cudaGetDeviceProperties`, `nvmlDeviceGetHandleByIndex`, etc.) must use `to_local_device()` or `to_remote_device()` to translate the user-provided index (virtual index) into a physical index for either the local backend or the remote server. Failing to do so causes "invalid device" errors when targeting local GPUs in remote-first mode.
 L129- 27. **cache_device_props(int dev) Scope**: This function is per-device. Callers must pass the specific device index (often `g_active_device`) to ensure properties (name, memory, compute capability) are queried and cached for the correct target.
 L130- 28. **NVML Forward Declarations**: Due to the complex mapping between NVML handles and virtual indices, `nvmlDeviceGetIndex` and `nvmlDeviceGetHandleByIndex` often require forward declarations to avoid undeclared identifier errors in earlier functions like `nvmlDeviceGetCudaComputeCapability`.
-L131- 
-L132- ## How to test
+29. **PyTorch RPATH loads bundled libcudart.so.12**: PyTorch's `libc10_cuda.so` has RPATH pointing to `nvidia/cuda_runtime/lib/`, which loads the bundled `libcudart.so.12` BEFORE system paths. This real runtime calls our fake driver and segfaults. Fix: replace torch's bundled `libcudart.so.12` with our library (which now exports `@@libcudart.so.12` versioned symbols via a linker version script). Install scripts handle this automatically.
+30. **-Bsymbolic prevents PLT interposition**: Without `-Wl,-Bsymbolic`, driver API functions (`cuXxx`) calling runtime API functions (`cudaXxx`) inside our library resolve through the PLT to torch's bundled `libcudart.so.12` instead of our own implementation, causing deadlocks. The `-Bsymbolic` linker flag forces internal calls to resolve to our own symbols directly.
+31. **cudaGetDeviceCount must call ensure_connected first**: The local GPU count (`g_local.local_count`) is only set by `init_local_gpu()`, which runs inside `ensure_connected()` → `load_config()`. If `cudaGetDeviceCount` reads the local count BEFORE calling `ensure_connected()`, it gets 0. Always call `ensure_connected()` first, then read the counts.
+32. **Thread cleanup at process exit**: During `__attribute__((destructor))` cleanup, threads may be partially torn down. Use `detach()` instead of `join()` for recv threads at exit (same strategy as Windows `DllMain`). Wrap all cleanup in `try/catch` to handle `std::system_error` from dead threads/mutexes.
+33. **cudaGetDeviceProperties_v2 alias**: PyTorch 2.10+ calls `cudaGetDeviceProperties_v2` instead of `cudaGetDeviceProperties`. Our library must export both names (the `_v2` variant is an alias to the same implementation).
+
+## How to test
 
 
 
@@ -146,7 +155,7 @@ PYTHONPATH=python python examples/stress_test.py localhost --duration 10  # Stre
 kill %1
 
 # Check symbols
-nm -D build/libgpushare_client.so.1.0.0 | grep " T " | wc -l  # should be ~2600+
+nm -D build/libgpushare_client.so.1.0.0 | grep " T " | wc -l  # should be ~2800+
 
 # Validate scripts
 for f in scripts/install-*.sh scripts/uninstall.sh; do bash -n "$f" && echo "$f: OK"; done
@@ -183,7 +192,8 @@ server/generated_dispatch.cpp — Auto-gen: 133 cuBLAS/cuDNN dispatch handlers
 server/generated_all_dispatch.cpp — Auto-gen: dlsym resolver for all libraries
 client/gpushare_client.cpp  — Client lib (runtime + driver + NVML, 112 hand-written functions)
 client/generated_stubs.cpp  — Auto-gen: 133 cuBLAS/cuDNN client stubs
-client/generated_all_stubs.cpp — Auto-gen: 2432 weak symbol exports
+client/generated_all_stubs.cpp — Auto-gen: ~2420 weak symbol exports
+client/libcudart.version    — Linker version script (@@libcudart.so.12)
 include/gpushare/protocol.h — Wire protocol + packed structs
 include/gpushare/cuda_defs.h — CUDA/NVML/Driver types (no CUDA toolkit needed)
 codegen/generate_stubs.py   — Codegen: function defs → full RPC stubs
@@ -205,6 +215,6 @@ CMakeLists.txt              — Build: server (needs CUDA) + client (no CUDA)
 
 - Server: Arch Linux, RTX 5070, CUDA 13.1, systemd service running
 - Tested clients: macOS (M-series MacBook), Windows 11 (VS 2026)
-- API exports: 2,600+ functions (112 hand-written + 133 generated RPC + 2,432 weak stubs)
+- API exports: 2,800+ functions (292 strong + 133 generated RPC + ~2,420 weak stubs with versioned tags)
 - Verified working: GPU detection (NVML + CUDA), memory ops, PTX kernel execution, data transfer round-trip, stress test at ~2 GB/s local / ~44 MB/s over 1GbE LAN
 - Performance: pipelined RPC with async/chunked memcpy, pinned buffer pool on server for DMA transfers

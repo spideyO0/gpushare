@@ -124,6 +124,17 @@ if(BUILD_CLIENT)
         # dl is needed for dlopen/dlsym (local GPU passthrough)
         # pthread is needed for the recv thread (Phase 4 pipelining)
         target_link_libraries(gpushare_client PRIVATE dl pthread)
+        # -Bsymbolic: resolve internal calls to our own exported symbols directly,
+        # bypassing PLT interposition. Without this, driver API functions (cuXxx)
+        # that call runtime API functions (cudaXxx) can resolve to a different
+        # library's implementation (e.g. torch's bundled libcudart.so.12 loaded
+        # via RPATH) instead of ours, causing deadlocks.
+        # Version script: export all symbols under libcudart.so.12 version tag
+        # so our library can replace torch's bundled libcudart.so.12 via symlink.
+        target_link_options(gpushare_client PRIVATE
+            -Wl,-Bsymbolic
+            -Wl,--version-script=${CMAKE_SOURCE_DIR}/client/libcudart.version
+        )
         if(HAVE_RDMA)
             target_compile_definitions(gpushare_client PRIVATE GPUSHARE_HAS_RDMA)
             target_link_libraries(gpushare_client PRIVATE ${IBVERBS_LIB} ${RDMACM_LIB})

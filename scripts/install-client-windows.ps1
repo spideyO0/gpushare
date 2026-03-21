@@ -388,7 +388,7 @@ if ($Compiler -eq "prebuilt" -and $NeedDownload) {
     }
 
     # -- Pre-build fixups for upgrades ------------------------------------
-    # Remove weak stubs that conflict with strong implementations on MinGW.
+    # Remove weak stubs that conflict with strong implementations in gpushare_client.cpp.
     # MinGW does not support weak symbol override like GCC on Linux, so
     # functions with both a weak stub and a strong definition cause
     # "multiple definition" linker errors.
@@ -396,9 +396,23 @@ if ($Compiler -eq "prebuilt" -and $NeedDownload) {
     if (Test-Path $allStubs) {
         $stubContent = Get-Content $allStubs -Raw
         $changed = $false
-        # cuGetProcAddress / _v2 are implemented in gpushare_client.cpp
-        foreach ($funcName in @("cuGetProcAddress\(\)", "cuGetProcAddress_v2\(\)")) {
-            $pattern = "(?m)^STUB_EXPORT int WEAK_SYM $funcName \{ return 0; \}\r?\n"
+        $conflictingStubs = @(
+            "cuGetProcAddress", "cuGetProcAddress_v2",
+            "cudaLaunchKernel", "cudaHostAlloc", "cudaHostRegister", "cudaHostUnregister",
+            "cudaMemcpyPeerAsync", "cudaFuncSetAttribute", "cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags",
+            "cudaLaunchKernelExC", "cudaDeviceGetPCIBusId", "cudaLaunchHostFunc",
+            "cudaStreamBeginCapture", "cudaStreamEndCapture", "cudaStreamIsCapturing",
+            "cudaGraphInstantiateWithFlags", "cudaGraphGetNodes", "cudaGraphDebugDotPrint",
+            "cudaGraphNodeGetDependencies", "cudaMemPoolSetAttribute", "cudaMemPoolGetAttribute",
+            "cudaMemPoolSetAccess", "cudaIpcGetMemHandle", "cudaIpcOpenMemHandle", "cudaIpcCloseMemHandle",
+            "cudaIpcGetEventHandle", "cudaIpcOpenEventHandle", "cudaMemcpyToSymbol",
+            "cudaEventRecordWithFlags", "cudaStreamGetPriority", "cudaMemcpy2DAsync",
+            "cudaGetDriverEntryPoint", "cudaGetDriverEntryPointByVersion",
+            "cudaGetDeviceProperties_v2"
+        )
+        foreach ($funcName in $conflictingStubs) {
+            $escaped = [regex]::Escape($funcName) + '\(\)'
+            $pattern = "(?m)^STUB_EXPORT int WEAK_SYM $escaped \{ return 0; \}\r?\n"
             if ($stubContent -match $pattern) {
                 $stubContent = $stubContent -replace $pattern, ""
                 $changed = $true

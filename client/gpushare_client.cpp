@@ -97,7 +97,52 @@
   #define REAL_CUDA_DEFAULT_PATH ""
 #endif
 
-/* Function pointer typedefs for real CUDA runtime */
+/* Function pointer typedefs for real CUDA driver API (from real libcuda.so.1) */
+typedef CUresult (*pfn_cuInit)(unsigned int);
+typedef CUresult (*pfn_cuDeviceGetCount)(int*);
+typedef CUresult (*pfn_cuDeviceGet)(CUdevice*, int);
+typedef CUresult (*pfn_cuDeviceGetName)(char*, int, CUdevice);
+typedef CUresult (*pfn_cuDeviceTotalMem)(size_t*, CUdevice);
+typedef CUresult (*pfn_cuDeviceGetAttribute)(int*, CUdevice_attribute, CUdevice);
+typedef CUresult (*pfn_cuDevicePrimaryCtxRetain)(CUcontext*, CUdevice);
+typedef CUresult (*pfn_cuDevicePrimaryCtxRelease)(CUdevice);
+typedef CUresult (*pfn_cuCtxSetCurrent)(CUcontext);
+typedef CUresult (*pfn_cuCtxSynchronize)(void);
+typedef CUresult (*pfn_cuMemAlloc)(CUdeviceptr*, size_t);
+typedef CUresult (*pfn_cuMemFree)(CUdeviceptr);
+typedef CUresult (*pfn_cuMemcpyHtoD)(CUdeviceptr, const void*, size_t);
+typedef CUresult (*pfn_cuMemcpyDtoH)(void*, CUdeviceptr, size_t);
+typedef CUresult (*pfn_cuMemcpyDtoD)(CUdeviceptr, CUdeviceptr, size_t);
+typedef CUresult (*pfn_cuMemcpyHtoDAsync)(CUdeviceptr, const void*, size_t, CUstream);
+typedef CUresult (*pfn_cuMemcpyDtoHAsync)(void*, CUdeviceptr, size_t, CUstream);
+typedef CUresult (*pfn_cuMemsetD8)(CUdeviceptr, unsigned char, size_t);
+typedef CUresult (*pfn_cuStreamCreate)(CUstream*, unsigned int);
+typedef CUresult (*pfn_cuStreamDestroy)(CUstream);
+typedef CUresult (*pfn_cuStreamSynchronize)(CUstream);
+typedef CUresult (*pfn_cuEventCreate)(CUevent*, unsigned int);
+typedef CUresult (*pfn_cuEventDestroy)(CUevent);
+typedef CUresult (*pfn_cuEventRecord)(CUevent, CUstream);
+typedef CUresult (*pfn_cuEventSynchronize)(CUevent);
+typedef CUresult (*pfn_cuEventElapsedTime)(float*, CUevent, CUevent);
+
+/* Function pointer typedefs for real NVML */
+typedef nvmlReturn_t (*pfn_nvmlInit_v2)(void);
+typedef nvmlReturn_t (*pfn_nvmlShutdown)(void);
+typedef nvmlReturn_t (*pfn_nvmlDeviceGetCount_v2)(unsigned int*);
+typedef nvmlReturn_t (*pfn_nvmlDeviceGetHandleByIndex_v2)(unsigned int, nvmlDevice_t*);
+typedef nvmlReturn_t (*pfn_nvmlDeviceGetName)(nvmlDevice_t, char*, unsigned int);
+typedef nvmlReturn_t (*pfn_nvmlDeviceGetMemoryInfo)(nvmlDevice_t, nvmlMemory_t*);
+typedef nvmlReturn_t (*pfn_nvmlDeviceGetUtilizationRates)(nvmlDevice_t, nvmlUtilization_t*);
+typedef nvmlReturn_t (*pfn_nvmlDeviceGetTemperature)(nvmlDevice_t, nvmlTemperatureSensors_t, unsigned int*);
+typedef nvmlReturn_t (*pfn_nvmlDeviceGetPowerUsage)(nvmlDevice_t, unsigned int*);
+typedef nvmlReturn_t (*pfn_nvmlDeviceGetFanSpeed)(nvmlDevice_t, unsigned int*);
+typedef nvmlReturn_t (*pfn_nvmlDeviceGetUUID)(nvmlDevice_t, char*, unsigned int);
+typedef nvmlReturn_t (*pfn_nvmlDeviceGetPciInfo_v3)(nvmlDevice_t, nvmlPciInfo_t*);
+typedef nvmlReturn_t (*pfn_nvmlDeviceGetCudaComputeCapability)(nvmlDevice_t, int*, int*);
+typedef nvmlReturn_t (*pfn_nvmlDeviceGetClockInfo)(nvmlDevice_t, int, unsigned int*);
+
+#ifdef _WIN32
+/* Windows still uses runtime API for local GPU passthrough (no recursive dlopen issue) */
 typedef cudaError_t (*pfn_cudaGetDeviceCount)(int*);
 typedef cudaError_t (*pfn_cudaGetDeviceProperties)(struct cudaDeviceProp*, int);
 typedef cudaError_t (*pfn_cudaSetDevice)(int);
@@ -115,27 +160,13 @@ typedef cudaError_t (*pfn_cudaEventDestroy)(cudaEvent_t);
 typedef cudaError_t (*pfn_cudaEventRecord)(cudaEvent_t, cudaStream_t);
 typedef cudaError_t (*pfn_cudaEventSynchronize)(cudaEvent_t);
 typedef cudaError_t (*pfn_cudaEventElapsedTime)(float*, cudaEvent_t, cudaEvent_t);
-
-/* Function pointer typedefs for real NVML */
-typedef nvmlReturn_t (*pfn_nvmlInit_v2)(void);
-typedef nvmlReturn_t (*pfn_nvmlShutdown)(void);
-typedef nvmlReturn_t (*pfn_nvmlDeviceGetCount_v2)(unsigned int*);
-typedef nvmlReturn_t (*pfn_nvmlDeviceGetHandleByIndex_v2)(unsigned int, nvmlDevice_t*);
-typedef nvmlReturn_t (*pfn_nvmlDeviceGetName)(nvmlDevice_t, char*, unsigned int);
-typedef nvmlReturn_t (*pfn_nvmlDeviceGetMemoryInfo)(nvmlDevice_t, nvmlMemory_t*);
-typedef nvmlReturn_t (*pfn_nvmlDeviceGetUtilizationRates)(nvmlDevice_t, nvmlUtilization_t*);
-typedef nvmlReturn_t (*pfn_nvmlDeviceGetTemperature)(nvmlDevice_t, nvmlTemperatureSensors_t, unsigned int*);
-typedef nvmlReturn_t (*pfn_nvmlDeviceGetPowerUsage)(nvmlDevice_t, unsigned int*);
-typedef nvmlReturn_t (*pfn_nvmlDeviceGetFanSpeed)(nvmlDevice_t, unsigned int*);
-typedef nvmlReturn_t (*pfn_nvmlDeviceGetUUID)(nvmlDevice_t, char*, unsigned int);
-typedef nvmlReturn_t (*pfn_nvmlDeviceGetPciInfo_v3)(nvmlDevice_t, nvmlPciInfo_t*);
-typedef nvmlReturn_t (*pfn_nvmlDeviceGetCudaComputeCapability)(nvmlDevice_t, int*, int*);
-typedef nvmlReturn_t (*pfn_nvmlDeviceGetClockInfo)(nvmlDevice_t, int, unsigned int*);
-typedef CUresult (*pfn_cuDeviceGetAttribute)(int*, CUdevice_attribute, CUdevice);
+#endif
 
 struct RealCUDA {
-    void *h_cudart = nullptr;
     void *h_cuda = nullptr;
+#ifdef _WIN32
+    void *h_cudart = nullptr;  /* Windows still uses runtime API for local passthrough */
+#endif
     void *h_nvml = nullptr;
     int local_count = 0;
     bool available = false;
@@ -143,10 +174,11 @@ struct RealCUDA {
     /* Local NVML device handles (one per local GPU) */
     nvmlDevice_t nvml_handles[8];
 
-    /* Driver API function pointers */
-    pfn_cuDeviceGetAttribute     cuDeviceGetAttribute = nullptr;
+    /* Per-device primary CUDA contexts (from real driver) */
+    CUcontext contexts[8];
 
-    /* Runtime API function pointers */
+#ifdef _WIN32
+    /* Windows: runtime API function pointers (from real cudart64_*.dll) */
     pfn_cudaGetDeviceCount       GetDeviceCount = nullptr;
     pfn_cudaGetDeviceProperties  GetDeviceProperties = nullptr;
     pfn_cudaSetDevice            SetDevice = nullptr;
@@ -164,6 +196,37 @@ struct RealCUDA {
     pfn_cudaEventRecord          EventRecord = nullptr;
     pfn_cudaEventSynchronize     EventSynchronize = nullptr;
     pfn_cudaEventElapsedTime     EventElapsedTime = nullptr;
+    /* Driver API (subset used on Windows) */
+    pfn_cuDeviceGetAttribute    DeviceGetAttribute = nullptr;
+#else
+    /* Linux/macOS: driver API function pointers (from real libcuda.so.1) */
+    pfn_cuInit                  Init = nullptr;
+    pfn_cuDeviceGetCount        DeviceGetCount = nullptr;
+    pfn_cuDeviceGet             DeviceGet = nullptr;
+    pfn_cuDeviceGetName         DeviceGetName = nullptr;
+    pfn_cuDeviceTotalMem        DeviceTotalMem = nullptr;
+    pfn_cuDeviceGetAttribute    DeviceGetAttribute = nullptr;
+    pfn_cuDevicePrimaryCtxRetain PrimaryCtxRetain = nullptr;
+    pfn_cuDevicePrimaryCtxRelease PrimaryCtxRelease = nullptr;
+    pfn_cuCtxSetCurrent         CtxSetCurrent = nullptr;
+    pfn_cuCtxSynchronize        CtxSynchronize = nullptr;
+    pfn_cuMemAlloc              MemAlloc = nullptr;
+    pfn_cuMemFree               MemFree = nullptr;
+    pfn_cuMemcpyHtoD            MemcpyHtoD = nullptr;
+    pfn_cuMemcpyDtoH            MemcpyDtoH = nullptr;
+    pfn_cuMemcpyDtoD            MemcpyDtoD = nullptr;
+    pfn_cuMemcpyHtoDAsync       MemcpyHtoDAsync = nullptr;
+    pfn_cuMemcpyDtoHAsync       MemcpyDtoHAsync = nullptr;
+    pfn_cuMemsetD8              MemsetD8 = nullptr;
+    pfn_cuStreamCreate          StreamCreate = nullptr;
+    pfn_cuStreamDestroy         StreamDestroy = nullptr;
+    pfn_cuStreamSynchronize     StreamSynchronize = nullptr;
+    pfn_cuEventCreate           EventCreate = nullptr;
+    pfn_cuEventDestroy          EventDestroy = nullptr;
+    pfn_cuEventRecord           EventRecord = nullptr;
+    pfn_cuEventSynchronize      EventSynchronize = nullptr;
+    pfn_cuEventElapsedTime      EventElapsedTime = nullptr;
+#endif
 
     /* NVML API function pointers */
     pfn_nvmlInit_v2                    NvmlInit = nullptr;
@@ -191,6 +254,72 @@ static std::string g_gpu_mode = "all";  /* "all", "remote", "local" */
 static std::string g_real_cuda_path = REAL_CUDA_DEFAULT_PATH;
 static std::string g_transport_type = "tcp";  /* Phase 9: "tcp" or "rdma" */
 static bool g_local_initialized = false;
+
+/* Activate the CUDA context for a local device. Must be called before any
+ * driver API operation on a local GPU. */
+static CUresult local_set_ctx(int local_dev) {
+    if (local_dev < 0 || local_dev >= g_local.local_count) return CUDA_ERROR_INVALID_DEVICE;
+    if (!g_local.CtxSetCurrent || !g_local.contexts[local_dev]) return CUDA_ERROR_NOT_INITIALIZED;
+    return g_local.CtxSetCurrent(g_local.contexts[local_dev]);
+}
+
+/* Fill a cudaDeviceProp struct from driver API queries for a local device */
+static cudaError_t local_get_device_props(struct cudaDeviceProp *prop, int local_dev) {
+    if (!prop || !g_local.DeviceGetAttribute) return cudaErrorInvalidValue;
+    memset(prop, 0, sizeof(*prop));
+
+    CUdevice dev;
+    if (g_local.DeviceGet) g_local.DeviceGet(&dev, local_dev);
+    else dev = local_dev;
+
+    if (g_local.DeviceGetName) g_local.DeviceGetName(prop->name, sizeof(prop->name), dev);
+    if (g_local.DeviceTotalMem) g_local.DeviceTotalMem(&prop->totalGlobalMem, dev);
+
+    auto ga = [&](CUdevice_attribute attr) -> int {
+        int val = 0;
+        g_local.DeviceGetAttribute(&val, attr, dev);
+        return val;
+    };
+
+    prop->sharedMemPerBlock     = ga(CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK);
+    prop->regsPerBlock          = ga(CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_BLOCK);
+    prop->warpSize              = ga(CU_DEVICE_ATTRIBUTE_WARP_SIZE);
+    prop->maxThreadsPerBlock    = ga(CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK);
+    prop->maxThreadsDim[0]      = ga(CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X);
+    prop->maxThreadsDim[1]      = ga(CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y);
+    prop->maxThreadsDim[2]      = ga(CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z);
+    prop->maxGridSize[0]        = ga(CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X);
+    prop->maxGridSize[1]        = ga(CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y);
+    prop->maxGridSize[2]        = ga(CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z);
+    prop->clockRate             = ga(CU_DEVICE_ATTRIBUTE_CLOCK_RATE);
+    prop->major                 = ga(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR);
+    prop->minor                 = ga(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR);
+    prop->multiProcessorCount   = ga(CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT);
+    prop->maxThreadsPerMultiProcessor = ga(CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR);
+    prop->totalConstMem         = ga(CU_DEVICE_ATTRIBUTE_TOTAL_CONSTANT_MEMORY);
+    prop->memoryBusWidth        = ga(CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH);
+    prop->l2CacheSize           = ga(CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE);
+    prop->memPitch              = 2147483647;
+    prop->textureAlignment      = 512;
+    prop->texturePitchAlignment = 32;
+    prop->deviceOverlap         = 1;
+    prop->canMapHostMemory      = ga(CU_DEVICE_ATTRIBUTE_CAN_MAP_HOST_MEMORY);
+    prop->concurrentKernels     = ga(CU_DEVICE_ATTRIBUTE_CONCURRENT_KERNELS);
+    prop->unifiedAddressing     = ga(CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING);
+    prop->managedMemory         = ga(CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY);
+    prop->computePreemptionSupported = ga(CU_DEVICE_ATTRIBUTE_COMPUTE_PREEMPTION_SUPPORTED);
+    prop->cooperativeLaunch     = ga(CU_DEVICE_ATTRIBUTE_COOPERATIVE_LAUNCH);
+    prop->asyncEngineCount      = ga(CU_DEVICE_ATTRIBUTE_ASYNC_ENGINE_COUNT);
+    prop->streamPrioritiesSupported = ga(CU_DEVICE_ATTRIBUTE_STREAM_PRIORITIES_SUPPORTED);
+    prop->globalL1CacheSupported = ga(CU_DEVICE_ATTRIBUTE_GLOBAL_L1_CACHE_SUPPORTED);
+    prop->localL1CacheSupported  = ga(CU_DEVICE_ATTRIBUTE_LOCAL_L1_CACHE_SUPPORTED);
+    prop->sharedMemPerMultiprocessor = ga(CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR);
+    prop->regsPerMultiprocessor = ga(CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR);
+    prop->maxBlocksPerMultiProcessor = ga(CU_DEVICE_ATTRIBUTE_MAX_BLOCKS_PER_MULTIPROCESSOR);
+    prop->pageableMemoryAccess  = 1;
+
+    return cudaSuccess;
+}
 
 static bool is_remote_device(int dev) {
     if (!g_local.available || g_gpu_mode == "remote") return true;
@@ -228,43 +357,46 @@ static void init_local_gpu() {
     dlflags |= RTLD_DEEPBIND;  /* prevent loaded lib from using our symbols */
 #endif
 
-    std::string cudart_path = g_real_cuda_path + "/libcudart.so";
-    std::string cuda_path   = g_real_cuda_path + "/libcuda.so.1";
-    std::string nvml_path   = g_real_cuda_path + "/libnvidia-ml.so.1";
+    std::string cuda_path = g_real_cuda_path + "/libcuda.so.1";
+    std::string nvml_path = g_real_cuda_path + "/libnvidia-ml.so.1";
 
-    /* Load libcuda.so.1 first (driver — no CUDA runtime dependency) */
+    /* Load ONLY libcuda.so.1 (driver API). DO NOT load libcudart.so — it
+     * internally dlopen's "libcuda.so.1" by name which resolves to our
+     * symlink, causing recursive loading and segfault. The driver API
+     * talks directly to the kernel module with no runtime dependencies. */
     g_local.h_cuda = dlopen(cuda_path.c_str(), dlflags);
     if (!g_local.h_cuda) return;  /* no local GPU driver found */
-
-    /* Load libcudart.so (runtime) */
-    g_local.h_cudart = dlopen(cudart_path.c_str(), dlflags);
-    if (!g_local.h_cudart) {
-        dlclose(g_local.h_cuda);
-        g_local.h_cuda = nullptr;
-        return;
-    }
 
     /* Load NVML (optional, for monitoring) */
     g_local.h_nvml = dlopen(nvml_path.c_str(), dlflags);
 
-    /* Load runtime function pointers */
-    DLSYM_LOAD(g_local.h_cudart, cudaGetDeviceCount,       GetDeviceCount);
-    DLSYM_LOAD(g_local.h_cudart, cudaGetDeviceProperties,  GetDeviceProperties);
-    DLSYM_LOAD(g_local.h_cudart, cudaSetDevice,            SetDevice);
-    DLSYM_LOAD(g_local.h_cudart, cudaMalloc,               Malloc);
-    DLSYM_LOAD(g_local.h_cudart, cudaFree,                 Free);
-    DLSYM_LOAD(g_local.h_cudart, cudaMemcpy,               Memcpy);
-    DLSYM_LOAD(g_local.h_cudart, cudaMemcpyAsync,          MemcpyAsync);
-    DLSYM_LOAD(g_local.h_cudart, cudaMemset,               Memset);
-    DLSYM_LOAD(g_local.h_cudart, cudaDeviceSynchronize,    DeviceSynchronize);
-    DLSYM_LOAD(g_local.h_cudart, cudaStreamCreate,         StreamCreate);
-    DLSYM_LOAD(g_local.h_cudart, cudaStreamDestroy,        StreamDestroy);
-    DLSYM_LOAD(g_local.h_cudart, cudaStreamSynchronize,    StreamSynchronize);
-    DLSYM_LOAD(g_local.h_cudart, cudaEventCreate,          EventCreate);
-    DLSYM_LOAD(g_local.h_cudart, cudaEventDestroy,         EventDestroy);
-    DLSYM_LOAD(g_local.h_cudart, cudaEventRecord,          EventRecord);
-    DLSYM_LOAD(g_local.h_cudart, cudaEventSynchronize,     EventSynchronize);
-    DLSYM_LOAD(g_local.h_cudart, cudaEventElapsedTime,     EventElapsedTime);
+    /* Load driver API function pointers */
+    DLSYM_LOAD(g_local.h_cuda, cuInit,                      Init);
+    DLSYM_LOAD(g_local.h_cuda, cuDeviceGetCount,             DeviceGetCount);
+    DLSYM_LOAD(g_local.h_cuda, cuDeviceGet,                  DeviceGet);
+    DLSYM_LOAD(g_local.h_cuda, cuDeviceGetName,              DeviceGetName);
+    DLSYM_LOAD(g_local.h_cuda, cuDeviceTotalMem_v2,          DeviceTotalMem);
+    DLSYM_LOAD(g_local.h_cuda, cuDeviceGetAttribute,         DeviceGetAttribute);
+    DLSYM_LOAD(g_local.h_cuda, cuDevicePrimaryCtxRetain,     PrimaryCtxRetain);
+    DLSYM_LOAD(g_local.h_cuda, cuDevicePrimaryCtxRelease_v2, PrimaryCtxRelease);
+    DLSYM_LOAD(g_local.h_cuda, cuCtxSetCurrent,              CtxSetCurrent);
+    DLSYM_LOAD(g_local.h_cuda, cuCtxSynchronize,             CtxSynchronize);
+    DLSYM_LOAD(g_local.h_cuda, cuMemAlloc_v2,                MemAlloc);
+    DLSYM_LOAD(g_local.h_cuda, cuMemFree_v2,                 MemFree);
+    DLSYM_LOAD(g_local.h_cuda, cuMemcpyHtoD_v2,              MemcpyHtoD);
+    DLSYM_LOAD(g_local.h_cuda, cuMemcpyDtoH_v2,              MemcpyDtoH);
+    DLSYM_LOAD(g_local.h_cuda, cuMemcpyDtoD_v2,              MemcpyDtoD);
+    DLSYM_LOAD(g_local.h_cuda, cuMemcpyHtoDAsync_v2,         MemcpyHtoDAsync);
+    DLSYM_LOAD(g_local.h_cuda, cuMemcpyDtoHAsync_v2,         MemcpyDtoHAsync);
+    DLSYM_LOAD(g_local.h_cuda, cuMemsetD8_v2,                MemsetD8);
+    DLSYM_LOAD(g_local.h_cuda, cuStreamCreate,               StreamCreate);
+    DLSYM_LOAD(g_local.h_cuda, cuStreamDestroy_v2,           StreamDestroy);
+    DLSYM_LOAD(g_local.h_cuda, cuStreamSynchronize,          StreamSynchronize);
+    DLSYM_LOAD(g_local.h_cuda, cuEventCreate,                EventCreate);
+    DLSYM_LOAD(g_local.h_cuda, cuEventDestroy_v2,            EventDestroy);
+    DLSYM_LOAD(g_local.h_cuda, cuEventRecord,                EventRecord);
+    DLSYM_LOAD(g_local.h_cuda, cuEventSynchronize,           EventSynchronize);
+    DLSYM_LOAD(g_local.h_cuda, cuEventElapsedTime,           EventElapsedTime);
 
     /* Load NVML function pointers */
     if (g_local.h_nvml) {
@@ -284,17 +416,32 @@ static void init_local_gpu() {
         DLSYM_LOAD(g_local.h_nvml, nvmlDeviceGetClockInfo,         NvmlDeviceGetClockInfo);
     }
 
-    /* Query local GPU count */
-    if (!g_local.GetDeviceCount) return;
+    /* Initialize real driver and query local GPU count */
+    if (!g_local.Init || !g_local.DeviceGetCount) return;
+
+    CUresult err = g_local.Init(0);
+    if (err != CUDA_SUCCESS) return;
 
     int count = 0;
-    cudaError_t err = g_local.GetDeviceCount(&count);
-    if (err != cudaSuccess || count <= 0) return;
+    err = g_local.DeviceGetCount(&count);
+    if (err != CUDA_SUCCESS || count <= 0) return;
     if (count > 8) count = 8;  /* cap at array size */
 
     g_local.local_count = count;
     g_local.available = true;
     g_remote_base = count;
+
+    /* Retain primary contexts for each local device */
+    for (int i = 0; i < count; i++) {
+        CUdevice dev;
+        if (g_local.DeviceGet) {
+            g_local.DeviceGet(&dev, i);
+        } else {
+            dev = i;
+        }
+        if (g_local.PrimaryCtxRetain)
+            g_local.PrimaryCtxRetain(&g_local.contexts[i], dev);
+    }
 
     /* Initialize local NVML handles */
     if (g_local.NvmlInit && g_local.NvmlDeviceGetHandleByIndex) {
@@ -305,13 +452,13 @@ static void init_local_gpu() {
     }
 
     fprintf(stderr, "[gpushare] Local GPU passthrough: %d local GPU(s) detected\n", count);
-    if (g_local.GetDeviceProperties) {
-        for (int i = 0; i < count; i++) {
-            struct cudaDeviceProp prop;
-            memset(&prop, 0, sizeof(prop));
-            g_local.GetDeviceProperties(&prop, i);
-            fprintf(stderr, "[gpushare]   Device %d (local): %s\n", i, prop.name);
-        }
+    for (int i = 0; i < count; i++) {
+        char name[256] = {0};
+        CUdevice dev;
+        if (g_local.DeviceGet) g_local.DeviceGet(&dev, i);
+        else dev = i;
+        if (g_local.DeviceGetName) g_local.DeviceGetName(name, sizeof(name), dev);
+        fprintf(stderr, "[gpushare]   Device %d (local): %s\n", i, name);
     }
     fprintf(stderr, "[gpushare]   Device %d+ (remote): via gpushare server\n", count);
 }
@@ -354,7 +501,7 @@ static void init_local_gpu() {
     if (!g_local.h_cuda) return;  /* no local NVIDIA driver */
 
     /* Load Driver API function pointers */
-    WINSYM_LOAD((HMODULE)g_local.h_cuda, cuDeviceGetAttribute, cuDeviceGetAttribute);
+    WINSYM_LOAD((HMODULE)g_local.h_cuda, cuDeviceGetAttribute, DeviceGetAttribute);
 
     /* Load cudart (try backup path first, then CUDA toolkit) */
     for (int i = 0; search_paths[i]; i++) {
@@ -617,6 +764,13 @@ struct ServerConnection {
     std::thread recv_thread;
     std::atomic<bool> recv_running{false};
 
+    /* Destructor detaches the recv thread to prevent std::terminate() from
+     * destroying a joinable thread. Full cleanup is done by gpushare_cleanup(). */
+    ~ServerConnection() {
+        recv_running = false;
+        if (recv_thread.joinable()) recv_thread.detach();
+    }
+
     bool connected() const { return transport != nullptr; }
 
     /* ── Recv thread ─────────────────────────────────────── */
@@ -627,10 +781,9 @@ struct ServerConnection {
     }
 
     void stop_recv() {
-        if (!recv_running.load()) return;
         recv_running = false;
-        if (transport) transport->shutdown_read();
-        if (recv_thread.joinable()) recv_thread.join();
+        try { if (transport) transport->shutdown_read(); } catch (...) {}
+        try { if (recv_thread.joinable()) recv_thread.join(); } catch (...) {}
     }
 
     void recv_loop() {
@@ -760,10 +913,7 @@ struct ServerConnection {
 
 /* ── Connection state ────────────────────────────────────── */
 static std::vector<std::unique_ptr<ServerConnection>> g_servers;
-static std::recursive_mutex g_connect_mtx;  /* protects initial connection setup
-                                              * Must be recursive: init_local_gpu() dlopen's
-                                              * real libcudart which may dlopen our libcuda.so.1
-                                              * symlink, re-entering cuInit → ensure_connected */
+static std::mutex g_connect_mtx;  /* protects initial connection setup */
 static cudaError_t  g_last_error  = cudaSuccess;
 
 /* Legacy globals — point to the active server for backward compat */
@@ -1022,7 +1172,7 @@ transport_ready:
 static bool ensure_connected() {
     if (!g_servers.empty()) return true;
 
-    std::lock_guard<std::recursive_mutex> lock(g_connect_mtx);
+    std::lock_guard<std::mutex> lock(g_connect_mtx);
     if (!g_servers.empty()) return true;  /* double-check after lock */
 
     load_config();
@@ -1120,22 +1270,28 @@ extern "C" {
 
 GPUSHARE_EXPORT cudaError_t cudaGetDeviceCount(int *count) {
     TRACE("cudaGetDeviceCount");
+
+    /* Ensure connection is established first — this also calls load_config()
+     * which runs init_local_gpu(), so local GPU count is only valid AFTER
+     * ensure_connected() returns. */
+    if (g_gpu_mode != "local") {
+        ensure_connected();
+    } else if (!g_local_initialized) {
+        /* Force init even in local-only mode */
+        load_config();
+    }
+
     int total = 0;
 
-    /* Count local GPUs */
+    /* Count local GPUs (must be AFTER ensure_connected/load_config) */
     if (g_local.available && g_gpu_mode != "remote") {
         total += g_local.local_count;
     }
 
-    /* Phase 11: Count remote GPUs across all servers */
-    if (g_gpu_mode != "local") {
-        if (!ensure_connected()) {
-            if (count) *count = total;
-            return total > 0 ? cudaSuccess : cudaErrorNoDevice;
-        }
+    /* Count remote GPUs across all servers */
+    if (g_gpu_mode != "local" && !g_servers.empty()) {
         total += g_total_remote_devices;
     }
-
     if (count) *count = total;
     return total > 0 ? cudaSuccess : cudaErrorNoDevice;
 }
@@ -1143,16 +1299,22 @@ GPUSHARE_EXPORT cudaError_t cudaGetDeviceCount(int *count) {
 GPUSHARE_EXPORT cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop, int device) {
     TRACE("cudaGetDeviceProperties(%d)", device);
 
-    /* Local GPU — delegate to real CUDA library */
-    if (g_local.available && !is_remote_device(device) && g_local.GetDeviceProperties) {
-        cudaError_t err = g_local.GetDeviceProperties(prop, to_local_device(device));
-        if (err == cudaSuccess && prop) {
-            /* Append " (local)" to name so user can distinguish */
-            size_t len = strlen(prop->name);
-            if (len + 8 < sizeof(prop->name))
-                strcat(prop->name, " (local)");
+    /* Local GPU — query via real driver/runtime API */
+    if (g_local.available && !is_remote_device(device)) {
+#ifdef _WIN32
+        if (g_local.GetDeviceProperties) {
+            cudaError_t err = g_local.GetDeviceProperties(prop, to_local_device(device));
+#else
+        {
+            cudaError_t err = local_get_device_props(prop, to_local_device(device));
+#endif
+            if (err == cudaSuccess && prop) {
+                size_t len = strlen(prop->name);
+                if (len + 8 < sizeof(prop->name))
+                    strcat(prop->name, " (local)");
+            }
+            return err;
         }
-        return err;
     }
 
     /* Remote GPU — RPC to server */
@@ -1216,14 +1378,23 @@ GPUSHARE_EXPORT cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop,
     return cudaSuccess;
 }
 
+/* CUDA 12+ alias: cudaGetDeviceProperties_v2 is the versioned name torch uses */
+GPUSHARE_EXPORT cudaError_t cudaGetDeviceProperties_v2(struct cudaDeviceProp *prop, int device) {
+    return cudaGetDeviceProperties(prop, device);
+}
+
 GPUSHARE_EXPORT cudaError_t cudaSetDevice(int device) {
     TRACE("cudaSetDevice(%d)", device);
     g_active_device = device;
 
-    /* Local GPU — delegate to real CUDA library */
+    /* Local GPU — activate context */
     if (g_local.available && !is_remote_device(device)) {
+#ifdef _WIN32
         if (g_local.SetDevice)
             return g_local.SetDevice(to_local_device(device));
+#else
+        local_set_ctx(to_local_device(device));
+#endif
         return cudaSuccess;
     }
 
@@ -1235,8 +1406,18 @@ GPUSHARE_EXPORT cudaError_t cudaSetDevice(int device) {
 
 GPUSHARE_EXPORT cudaError_t cudaMalloc(void **devPtr, size_t size) {
     TRACE("cudaMalloc(%zu bytes)", size);
+#ifdef _WIN32
     if (g_local.available && !is_remote_device(g_active_device) && g_local.Malloc)
         return g_local.Malloc(devPtr, size);
+#else
+    if (g_local.available && !is_remote_device(g_active_device) && g_local.MemAlloc) {
+        local_set_ctx(to_local_device(g_active_device));
+        CUdeviceptr dptr;
+        CUresult r = g_local.MemAlloc(&dptr, size);
+        if (devPtr) *devPtr = (void*)(uintptr_t)dptr;
+        return (r == CUDA_SUCCESS) ? cudaSuccess : cudaErrorMemoryAllocation;
+    }
+#endif
 
     gs_malloc_req_t req;
     req.size = size;
@@ -1252,8 +1433,16 @@ GPUSHARE_EXPORT cudaError_t cudaMalloc(void **devPtr, size_t size) {
 GPUSHARE_EXPORT cudaError_t cudaFree(void *devPtr) {
     TRACE("cudaFree(%p)", devPtr);
     if (!devPtr) return cudaSuccess;
+#ifdef _WIN32
     if (g_local.available && !is_remote_device(g_active_device) && g_local.Free)
         return g_local.Free(devPtr);
+#else
+    if (g_local.available && !is_remote_device(g_active_device) && g_local.MemFree) {
+        local_set_ctx(to_local_device(g_active_device));
+        CUresult r = g_local.MemFree((CUdeviceptr)(uintptr_t)devPtr);
+        return (r == CUDA_SUCCESS) ? cudaSuccess : cudaErrorUnknown;
+    }
+#endif
     gs_free_req_t req;
     req.device_ptr = ptr_to_handle(devPtr);
     return (cudaError_t)rpc_simple(GS_OP_FREE, &req, sizeof(req));
@@ -1335,8 +1524,25 @@ static cudaError_t cudaMemcpy_d2h_chunked(void *dst, const void *src, size_t cou
 
 GPUSHARE_EXPORT cudaError_t cudaMemcpy(void *dst, const void *src, size_t count, cudaMemcpyKind kind) {
     TRACE("cudaMemcpy(%zu bytes, kind=%d)", count, kind);
+#ifdef _WIN32
     if (g_local.available && !is_remote_device(g_active_device) && g_local.Memcpy)
         return g_local.Memcpy(dst, src, count, kind);
+#else
+    if (g_local.available && !is_remote_device(g_active_device)) {
+        local_set_ctx(to_local_device(g_active_device));
+        CUresult r;
+        if (kind == cudaMemcpyHostToDevice && g_local.MemcpyHtoD)
+            r = g_local.MemcpyHtoD((CUdeviceptr)(uintptr_t)dst, src, count);
+        else if (kind == cudaMemcpyDeviceToHost && g_local.MemcpyDtoH)
+            r = g_local.MemcpyDtoH(dst, (CUdeviceptr)(uintptr_t)src, count);
+        else if (kind == cudaMemcpyDeviceToDevice && g_local.MemcpyDtoD)
+            r = g_local.MemcpyDtoD((CUdeviceptr)(uintptr_t)dst, (CUdeviceptr)(uintptr_t)src, count);
+        else if (kind == cudaMemcpyHostToHost)
+            { memcpy(dst, src, count); return cudaSuccess; }
+        else return cudaErrorInvalidMemcpyDirection;
+        return (r == CUDA_SUCCESS) ? cudaSuccess : cudaErrorUnknown;
+    }
+#endif
 
     if (kind == cudaMemcpyHostToDevice) {
         /* Phase 3: Use chunked transfer for large payloads */
@@ -1431,8 +1637,26 @@ GPUSHARE_EXPORT cudaError_t cudaMemcpy(void *dst, const void *src, size_t count,
 
 GPUSHARE_EXPORT cudaError_t cudaMemcpyAsync(void *dst, const void *src, size_t count,
                                              cudaMemcpyKind kind, cudaStream_t stream) {
+#ifdef _WIN32
     if (g_local.available && !is_remote_device(g_active_device) && g_local.MemcpyAsync)
         return g_local.MemcpyAsync(dst, src, count, kind, stream);
+#else
+    if (g_local.available && !is_remote_device(g_active_device)) {
+        local_set_ctx(to_local_device(g_active_device));
+        CUresult r;
+        CUstream cs = (CUstream)stream;
+        if (kind == cudaMemcpyHostToDevice && g_local.MemcpyHtoDAsync)
+            r = g_local.MemcpyHtoDAsync((CUdeviceptr)(uintptr_t)dst, src, count, cs);
+        else if (kind == cudaMemcpyDeviceToHost && g_local.MemcpyDtoHAsync)
+            r = g_local.MemcpyDtoHAsync(dst, (CUdeviceptr)(uintptr_t)src, count, cs);
+        else if (kind == cudaMemcpyDeviceToDevice && g_local.MemcpyDtoD)
+            r = g_local.MemcpyDtoD((CUdeviceptr)(uintptr_t)dst, (CUdeviceptr)(uintptr_t)src, count);
+        else if (kind == cudaMemcpyHostToHost)
+            { memcpy(dst, src, count); return cudaSuccess; }
+        else return cudaErrorInvalidMemcpyDirection;
+        return (r == CUDA_SUCCESS) ? cudaSuccess : cudaErrorUnknown;
+    }
+#endif
 
     /* Phase 2: Use async opcodes when server supports them */
     if (g_server_caps & GS_CAP_ASYNC) {
@@ -1482,8 +1706,16 @@ GPUSHARE_EXPORT cudaError_t cudaMemcpyAsync(void *dst, const void *src, size_t c
 
 GPUSHARE_EXPORT cudaError_t cudaMemset(void *devPtr, int value, size_t count) {
     TRACE("cudaMemset(%p, %d, %zu)", devPtr, value, count);
+#ifdef _WIN32
     if (g_local.available && !is_remote_device(g_active_device) && g_local.Memset)
         return g_local.Memset(devPtr, value, count);
+#else
+    if (g_local.available && !is_remote_device(g_active_device) && g_local.MemsetD8) {
+        local_set_ctx(to_local_device(g_active_device));
+        CUresult r = g_local.MemsetD8((CUdeviceptr)(uintptr_t)devPtr, (unsigned char)value, count);
+        return (r == CUDA_SUCCESS) ? cudaSuccess : cudaErrorUnknown;
+    }
+#endif
     gs_memset_req_t req;
     req.device_ptr = ptr_to_handle(devPtr);
     req.value = value;
@@ -1493,15 +1725,31 @@ GPUSHARE_EXPORT cudaError_t cudaMemset(void *devPtr, int value, size_t count) {
 
 GPUSHARE_EXPORT cudaError_t cudaDeviceSynchronize(void) {
     TRACE("cudaDeviceSynchronize");
+#ifdef _WIN32
     if (g_local.available && !is_remote_device(g_active_device) && g_local.DeviceSynchronize)
         return g_local.DeviceSynchronize();
+#else
+    if (g_local.available && !is_remote_device(g_active_device) && g_local.CtxSynchronize) {
+        local_set_ctx(to_local_device(g_active_device));
+        CUresult r = g_local.CtxSynchronize();
+        return (r == CUDA_SUCCESS) ? cudaSuccess : cudaErrorUnknown;
+    }
+#endif
     return (cudaError_t)rpc_simple(GS_OP_DEVICE_SYNC, nullptr, 0);
 }
 
 GPUSHARE_EXPORT cudaError_t cudaStreamCreate(cudaStream_t *pStream) {
     TRACE("cudaStreamCreate");
+#ifdef _WIN32
     if (g_local.available && !is_remote_device(g_active_device) && g_local.StreamCreate)
         return g_local.StreamCreate(pStream);
+#else
+    if (g_local.available && !is_remote_device(g_active_device) && g_local.StreamCreate) {
+        local_set_ctx(to_local_device(g_active_device));
+        CUresult r = g_local.StreamCreate((CUstream*)pStream, 0);
+        return (r == CUDA_SUCCESS) ? cudaSuccess : cudaErrorUnknown;
+    }
+#endif
     std::vector<uint8_t> resp;
     if (!rpc_call(GS_OP_STREAM_CREATE, nullptr, 0, resp)) return cudaErrorUnknown;
     if (resp.size() < sizeof(gs_stream_create_resp_t)) return cudaErrorUnknown;
@@ -1512,8 +1760,15 @@ GPUSHARE_EXPORT cudaError_t cudaStreamCreate(cudaStream_t *pStream) {
 
 GPUSHARE_EXPORT cudaError_t cudaStreamDestroy(cudaStream_t stream) {
     TRACE("cudaStreamDestroy");
+#ifdef _WIN32
     if (g_local.available && !is_remote_device(g_active_device) && g_local.StreamDestroy)
         return g_local.StreamDestroy(stream);
+#else
+    if (g_local.available && !is_remote_device(g_active_device) && g_local.StreamDestroy) {
+        CUresult r = g_local.StreamDestroy((CUstream)stream);
+        return (r == CUDA_SUCCESS) ? cudaSuccess : cudaErrorUnknown;
+    }
+#endif
     gs_stream_req_t req;
     req.stream_handle = ptr_to_handle(stream);
     return (cudaError_t)rpc_simple(GS_OP_STREAM_DESTROY, &req, sizeof(req));
@@ -1521,8 +1776,15 @@ GPUSHARE_EXPORT cudaError_t cudaStreamDestroy(cudaStream_t stream) {
 
 GPUSHARE_EXPORT cudaError_t cudaStreamSynchronize(cudaStream_t stream) {
     TRACE("cudaStreamSynchronize");
+#ifdef _WIN32
     if (g_local.available && !is_remote_device(g_active_device) && g_local.StreamSynchronize)
         return g_local.StreamSynchronize(stream);
+#else
+    if (g_local.available && !is_remote_device(g_active_device) && g_local.StreamSynchronize) {
+        CUresult r = g_local.StreamSynchronize((CUstream)stream);
+        return (r == CUDA_SUCCESS) ? cudaSuccess : cudaErrorUnknown;
+    }
+#endif
     gs_stream_req_t req;
     req.stream_handle = ptr_to_handle(stream);
     return (cudaError_t)rpc_simple(GS_OP_STREAM_SYNC, &req, sizeof(req));
@@ -1530,8 +1792,16 @@ GPUSHARE_EXPORT cudaError_t cudaStreamSynchronize(cudaStream_t stream) {
 
 GPUSHARE_EXPORT cudaError_t cudaEventCreate(cudaEvent_t *event) {
     TRACE("cudaEventCreate");
+#ifdef _WIN32
     if (g_local.available && !is_remote_device(g_active_device) && g_local.EventCreate)
         return g_local.EventCreate(event);
+#else
+    if (g_local.available && !is_remote_device(g_active_device) && g_local.EventCreate) {
+        local_set_ctx(to_local_device(g_active_device));
+        CUresult r = g_local.EventCreate((CUevent*)event, 0);
+        return (r == CUDA_SUCCESS) ? cudaSuccess : cudaErrorUnknown;
+    }
+#endif
     std::vector<uint8_t> resp;
     if (!rpc_call(GS_OP_EVENT_CREATE, nullptr, 0, resp)) return cudaErrorUnknown;
     if (resp.size() < sizeof(gs_event_create_resp_t)) return cudaErrorUnknown;
@@ -1542,16 +1812,30 @@ GPUSHARE_EXPORT cudaError_t cudaEventCreate(cudaEvent_t *event) {
 
 GPUSHARE_EXPORT cudaError_t cudaEventDestroy(cudaEvent_t event) {
     TRACE("cudaEventDestroy");
+#ifdef _WIN32
     if (g_local.available && !is_remote_device(g_active_device) && g_local.EventDestroy)
         return g_local.EventDestroy(event);
+#else
+    if (g_local.available && !is_remote_device(g_active_device) && g_local.EventDestroy) {
+        CUresult r = g_local.EventDestroy((CUevent)event);
+        return (r == CUDA_SUCCESS) ? cudaSuccess : cudaErrorUnknown;
+    }
+#endif
     uint64_t handle = ptr_to_handle(event);
     return (cudaError_t)rpc_simple(GS_OP_EVENT_DESTROY, &handle, sizeof(handle));
 }
 
 GPUSHARE_EXPORT cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
     TRACE("cudaEventRecord");
+#ifdef _WIN32
     if (g_local.available && !is_remote_device(g_active_device) && g_local.EventRecord)
         return g_local.EventRecord(event, stream);
+#else
+    if (g_local.available && !is_remote_device(g_active_device) && g_local.EventRecord) {
+        CUresult r = g_local.EventRecord((CUevent)event, (CUstream)stream);
+        return (r == CUDA_SUCCESS) ? cudaSuccess : cudaErrorUnknown;
+    }
+#endif
     gs_event_record_req_t req;
     req.event_handle  = ptr_to_handle(event);
     req.stream_handle = ptr_to_handle(stream);
@@ -1560,16 +1844,30 @@ GPUSHARE_EXPORT cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stre
 
 GPUSHARE_EXPORT cudaError_t cudaEventSynchronize(cudaEvent_t event) {
     TRACE("cudaEventSynchronize");
+#ifdef _WIN32
     if (g_local.available && !is_remote_device(g_active_device) && g_local.EventSynchronize)
         return g_local.EventSynchronize(event);
+#else
+    if (g_local.available && !is_remote_device(g_active_device) && g_local.EventSynchronize) {
+        CUresult r = g_local.EventSynchronize((CUevent)event);
+        return (r == CUDA_SUCCESS) ? cudaSuccess : cudaErrorUnknown;
+    }
+#endif
     uint64_t handle = ptr_to_handle(event);
     return (cudaError_t)rpc_simple(GS_OP_EVENT_SYNC, &handle, sizeof(handle));
 }
 
 GPUSHARE_EXPORT cudaError_t cudaEventElapsedTime(float *ms, cudaEvent_t start, cudaEvent_t end) {
     TRACE("cudaEventElapsedTime");
+#ifdef _WIN32
     if (g_local.available && !is_remote_device(g_active_device) && g_local.EventElapsedTime)
         return g_local.EventElapsedTime(ms, start, end);
+#else
+    if (g_local.available && !is_remote_device(g_active_device) && g_local.EventElapsedTime) {
+        CUresult r = g_local.EventElapsedTime(ms, (CUevent)start, (CUevent)end);
+        return (r == CUDA_SUCCESS) ? cudaSuccess : cudaErrorUnknown;
+    }
+#endif
     gs_event_elapsed_req_t req;
     req.start_event = ptr_to_handle(start);
     req.end_event   = ptr_to_handle(end);
@@ -1674,11 +1972,16 @@ static gs_device_props_t g_cached_props;
 static CUresult cache_device_props(int dev) {
     if (g_props_cached && g_props_cached_device == dev) return CUDA_SUCCESS;
 
-    /* Local GPU — get from real library and convert to our format */
-    if (g_local.available && !is_remote_device(dev) && g_local.GetDeviceProperties) {
+    /* Local GPU — query and convert to our format */
+    if (g_local.available && !is_remote_device(dev)) {
         struct cudaDeviceProp prop;
         memset(&prop, 0, sizeof(prop));
+#ifdef _WIN32
+        if (!g_local.GetDeviceProperties) return CUDA_ERROR_UNKNOWN;
         cudaError_t err = g_local.GetDeviceProperties(&prop, to_local_device(dev));
+#else
+        cudaError_t err = local_get_device_props(&prop, to_local_device(dev));
+#endif
         if (err != cudaSuccess) return CUDA_ERROR_UNKNOWN;
         memset(&g_cached_props, 0, sizeof(g_cached_props));
         strncpy(g_cached_props.name, prop.name, sizeof(g_cached_props.name) - 1);
@@ -2184,12 +2487,15 @@ GPUSHARE_EXPORT CUresult cuGetProcAddress(const char *symbol, void **pfn, int cu
     (void)cudaVersion; (void)flags;
     if (!symbol || !pfn) return CUDA_ERROR_INVALID_VALUE;
     *pfn = _self_sym(symbol);
-    if (*pfn) return CUDA_SUCCESS;
+    if (*pfn) { TRACE("cuGetProcAddress(%s) -> %p", symbol, *pfn); return CUDA_SUCCESS; }
     /* Symbol not found — try with version suffixes that CUDA sometimes uses */
     char versioned[256];
     snprintf(versioned, sizeof(versioned), "%s_v2", symbol);
     *pfn = _self_sym(versioned);
-    if (*pfn) return CUDA_SUCCESS;
+    if (*pfn) { TRACE("cuGetProcAddress(%s) -> %s -> %p", symbol, versioned, *pfn); return CUDA_SUCCESS; }
+    snprintf(versioned, sizeof(versioned), "%s_v3", symbol);
+    *pfn = _self_sym(versioned);
+    if (*pfn) { TRACE("cuGetProcAddress(%s) -> %s -> %p", symbol, versioned, *pfn); return CUDA_SUCCESS; }
     TRACE("cuGetProcAddress: not found: %s", symbol);
     return CUDA_ERROR_NOT_FOUND;
 }
@@ -2531,12 +2837,215 @@ GPUSHARE_EXPORT const char* nvmlErrorString(nvmlReturn_t result) {
     }
 }
 
+/* ── CUDA Runtime internal symbols ───────────────────────── */
+/* These __cuda* functions are used by nvcc-compiled CUDA code for kernel
+ * registration and launch configuration. PyTorch's bundled CUDA libraries
+ * (libtorch_cuda.so, etc.) need these versioned as @@libcudart.so.12.
+ * We provide no-op stubs since we don't execute kernels locally —
+ * all computation happens on the remote GPU server. */
+
+GPUSHARE_EXPORT void **__cudaRegisterFatBinary(void *fatCubin) {
+    (void)fatCubin;
+    static void *fake_handle = (void*)(uintptr_t)0xFA7B1;
+    return &fake_handle;
+}
+
+GPUSHARE_EXPORT void __cudaRegisterFatBinaryEnd(void **fatCubinHandle) {
+    (void)fatCubinHandle;
+}
+
+GPUSHARE_EXPORT void __cudaUnregisterFatBinary(void **fatCubinHandle) {
+    (void)fatCubinHandle;
+}
+
+GPUSHARE_EXPORT void __cudaRegisterFunction(
+    void **fatCubinHandle, const char *hostFun, char *deviceFun,
+    const char *deviceName, int thread_limit, void *tid, void *bid,
+    void *bDim, void *gDim, int *wSize) {
+    (void)fatCubinHandle; (void)hostFun; (void)deviceFun;
+    (void)deviceName; (void)thread_limit; (void)tid; (void)bid;
+    (void)bDim; (void)gDim; (void)wSize;
+}
+
+GPUSHARE_EXPORT void __cudaRegisterVar(
+    void **fatCubinHandle, char *hostVar, char *deviceAddress,
+    const char *deviceName, int ext, size_t size, int constant, int global) {
+    (void)fatCubinHandle; (void)hostVar; (void)deviceAddress;
+    (void)deviceName; (void)ext; (void)size; (void)constant; (void)global;
+}
+
+GPUSHARE_EXPORT unsigned __cudaPushCallConfiguration(
+    dim3 gridDim, dim3 blockDim, size_t sharedMem, cudaStream_t stream) {
+    (void)gridDim; (void)blockDim; (void)sharedMem; (void)stream;
+    return 0;
+}
+
+GPUSHARE_EXPORT cudaError_t __cudaPopCallConfiguration(
+    dim3 *gridDim, dim3 *blockDim, size_t *sharedMem, cudaStream_t *stream) {
+    if (gridDim) { gridDim->x = 1; gridDim->y = 1; gridDim->z = 1; }
+    if (blockDim) { blockDim->x = 1; blockDim->y = 1; blockDim->z = 1; }
+    if (sharedMem) *sharedMem = 0;
+    if (stream) *stream = nullptr;
+    return cudaSuccess;
+}
+
+GPUSHARE_EXPORT void __cudaInitModule(void **fatCubinHandle) {
+    (void)fatCubinHandle;
+}
+
+GPUSHARE_EXPORT cudaError_t cudaGetDriverEntryPoint(const char *symbol, void **funcPtr,
+                                                     unsigned long long flags) {
+    (void)flags;
+    if (!symbol || !funcPtr) return cudaErrorInvalidValue;
+    *funcPtr = _self_sym(symbol);
+    return *funcPtr ? cudaSuccess : cudaErrorNotFound;
+}
+
+GPUSHARE_EXPORT cudaError_t cudaGetDriverEntryPointByVersion(const char *symbol, void **funcPtr,
+                                                              unsigned int cudaVersion,
+                                                              unsigned long long flags,
+                                                              int *driverStatus) {
+    (void)cudaVersion; (void)flags;
+    if (!symbol || !funcPtr) return cudaErrorInvalidValue;
+    *funcPtr = _self_sym(symbol);
+    if (driverStatus) *driverStatus = (*funcPtr) ? 1 : 0;
+    return *funcPtr ? cudaSuccess : cudaErrorNotFound;
+}
+
+/* Additional runtime API stubs needed by PyTorch
+ * NOTE: Many cuda* functions are already in generated_stubs.cpp (with full RPC).
+ * Only add stubs here for functions NOT in generated_stubs.cpp. */
+
+GPUSHARE_EXPORT cudaError_t cudaEventRecordWithFlags(cudaEvent_t event, cudaStream_t stream,
+                                                      unsigned int flags) {
+    (void)flags;
+    return cudaEventRecord(event, stream);
+}
+
+GPUSHARE_EXPORT cudaError_t cudaStreamGetPriority(cudaStream_t stream, int *priority) {
+    (void)stream;
+    if (priority) *priority = 0;
+    return cudaSuccess;
+}
+
+GPUSHARE_EXPORT cudaError_t cudaHostAlloc(void **pHost, size_t size, unsigned int flags) {
+    (void)flags;
+    *pHost = malloc(size);
+    return *pHost ? cudaSuccess : cudaErrorMemoryAllocation;
+}
+
+GPUSHARE_EXPORT cudaError_t cudaHostRegister(void *ptr, size_t size, unsigned int flags) {
+    (void)ptr; (void)size; (void)flags;
+    return cudaSuccess;
+}
+
+GPUSHARE_EXPORT cudaError_t cudaHostUnregister(void *ptr) {
+    (void)ptr;
+    return cudaSuccess;
+}
+
+GPUSHARE_EXPORT cudaError_t cudaMemcpyPeerAsync(void *dst, int dstDevice, const void *src,
+                                                  int srcDevice, size_t count, cudaStream_t stream) {
+    (void)dstDevice; (void)srcDevice; (void)stream;
+    return cudaMemcpy(dst, src, count, cudaMemcpyDeviceToDevice);
+}
+
+GPUSHARE_EXPORT cudaError_t cudaFuncSetAttribute(const void *func, int attr, int value) {
+    (void)func; (void)attr; (void)value;
+    return cudaSuccess;
+}
+
+GPUSHARE_EXPORT cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
+    int *numBlocks, const void *func, int blockSize, size_t dynamicSMemSize, unsigned int flags) {
+    (void)func; (void)blockSize; (void)dynamicSMemSize; (void)flags;
+    if (numBlocks) *numBlocks = 16;
+    return cudaSuccess;
+}
+
+GPUSHARE_EXPORT cudaError_t cudaLaunchKernel(const void *func, dim3 gridDim, dim3 blockDim,
+                                              void **args, size_t sharedMem, cudaStream_t stream) {
+    (void)func; (void)gridDim; (void)blockDim; (void)args; (void)sharedMem; (void)stream;
+    return cudaSuccess;  /* TODO: route to server */
+}
+
+GPUSHARE_EXPORT cudaError_t cudaLaunchKernelExC(void *config, const void *func, void **args) {
+    (void)config; (void)func; (void)args;
+    return cudaSuccess;
+}
+
+GPUSHARE_EXPORT cudaError_t cudaDeviceGetPCIBusId(char *pciBusId, int len, int device) {
+    (void)device;
+    if (pciBusId && len > 0) snprintf(pciBusId, len, "0000:00:00.0");
+    return cudaSuccess;
+}
+
+GPUSHARE_EXPORT cudaError_t cudaLaunchHostFunc(cudaStream_t stream, void (*fn)(void*), void *userData) {
+    (void)stream;
+    if (fn) fn(userData);
+    return cudaSuccess;
+}
+
+GPUSHARE_EXPORT cudaError_t cudaProfilerStart(void) { return cudaSuccess; }
+GPUSHARE_EXPORT cudaError_t cudaProfilerStop(void) { return cudaSuccess; }
+GPUSHARE_EXPORT cudaError_t cudaThreadExchangeStreamCaptureMode(int *mode) {
+    if (mode) *mode = 0;
+    return cudaSuccess;
+}
+
+/* Stream capture stubs (graph API) */
+GPUSHARE_EXPORT cudaError_t cudaStreamBeginCapture(cudaStream_t s, int mode) { (void)s; (void)mode; return cudaErrorStreamCaptureUnsupported; }
+GPUSHARE_EXPORT cudaError_t cudaStreamEndCapture(cudaStream_t s, void **g) { (void)s; (void)g; return cudaErrorStreamCaptureUnsupported; }
+GPUSHARE_EXPORT cudaError_t cudaStreamIsCapturing(cudaStream_t s, int *status) { (void)s; if (status) *status = 0; return cudaSuccess; }
+GPUSHARE_EXPORT cudaError_t cudaStreamGetCaptureInfo_v2(cudaStream_t s, int *status, void *id, void *g, void *deps, void *numDeps) {
+    (void)s; (void)id; (void)g; (void)deps; (void)numDeps;
+    if (status) *status = 0;
+    return cudaSuccess;
+}
+
+/* Graph API stubs (not in generated_stubs) */
+GPUSHARE_EXPORT cudaError_t cudaGraphInstantiateWithFlags(void **exec, void *graph, unsigned long long flags) { (void)exec; (void)graph; (void)flags; return cudaErrorNotSupported; }
+GPUSHARE_EXPORT cudaError_t cudaGraphGetNodes(void *graph, void *nodes, size_t *numNodes) { (void)graph; (void)nodes; if (numNodes) *numNodes = 0; return cudaSuccess; }
+GPUSHARE_EXPORT cudaError_t cudaGraphDebugDotPrint(void *graph, const char *path, unsigned int flags) { (void)graph; (void)path; (void)flags; return cudaSuccess; }
+GPUSHARE_EXPORT cudaError_t cudaGraphNodeGetDependencies(void *node, void *deps, size_t *numDeps) { (void)node; (void)deps; if (numDeps) *numDeps = 0; return cudaSuccess; }
+
+/* Memory pool stubs (not in generated_stubs) */
+GPUSHARE_EXPORT cudaError_t cudaMemPoolSetAttribute(void *memPool, int attr, void *value) { (void)memPool; (void)attr; (void)value; return cudaSuccess; }
+GPUSHARE_EXPORT cudaError_t cudaMemPoolGetAttribute(void *memPool, int attr, void *value) { (void)memPool; (void)attr; if (value) memset(value, 0, 8); return cudaSuccess; }
+GPUSHARE_EXPORT cudaError_t cudaMemPoolSetAccess(void *memPool, void *descList, size_t count) { (void)memPool; (void)descList; (void)count; return cudaSuccess; }
+
+/* IPC stubs */
+GPUSHARE_EXPORT cudaError_t cudaIpcGetMemHandle(void *handle, void *devPtr) { (void)handle; (void)devPtr; return cudaErrorNotSupported; }
+GPUSHARE_EXPORT cudaError_t cudaIpcOpenMemHandle(void **devPtr, void *handle, unsigned int flags) { (void)devPtr; (void)handle; (void)flags; return cudaErrorNotSupported; }
+GPUSHARE_EXPORT cudaError_t cudaIpcCloseMemHandle(void *devPtr) { (void)devPtr; return cudaSuccess; }
+GPUSHARE_EXPORT cudaError_t cudaIpcGetEventHandle(void *handle, cudaEvent_t event) { (void)handle; (void)event; return cudaErrorNotSupported; }
+GPUSHARE_EXPORT cudaError_t cudaIpcOpenEventHandle(cudaEvent_t *event, void *handle) { (void)event; (void)handle; return cudaErrorNotSupported; }
+
+/* Symbol stubs */
+GPUSHARE_EXPORT cudaError_t cudaMemcpyToSymbol(const void *symbol, const void *src, size_t count, size_t offset, cudaMemcpyKind kind) {
+    (void)symbol; (void)src; (void)count; (void)offset; (void)kind;
+    return cudaErrorInvalidSymbol;
+}
+
 /* ── Cleanup ─────────────────────────────────────────────── */
 
 static void GPUSHARE_DESTRUCTOR gpushare_cleanup(void) {
-    /* Phase 11: Disconnect all servers */
+    /* Phase 11: Disconnect all servers.
+     * During process exit, threads may already be partially torn down.
+     * Use the same strategy as Windows DllMain: detach recv threads
+     * instead of joining, send CLOSE, and let the OS clean up. */
     for (auto &sc : g_servers) {
-        if (sc) sc->disconnect();
+        if (!sc) continue;
+        sc->recv_running = false;
+        if (sc->transport) {
+            try {
+                gs_header_t hdr;
+                gs_header_init(&hdr, GS_OP_CLOSE, 0, GPUSHARE_HEADER_SIZE);
+                sc->transport->send(&hdr, sizeof(hdr));
+                sc->transport->shutdown_read();
+            } catch (...) {}
+        }
+        try { if (sc->recv_thread.joinable()) sc->recv_thread.detach(); } catch (...) {}
+        try { if (sc->transport) { sc->transport->close(); sc->transport.reset(); } } catch (...) {}
     }
     g_servers.clear();
     g_device_routes.clear();
@@ -2552,7 +3061,16 @@ static void GPUSHARE_DESTRUCTOR gpushare_cleanup(void) {
     /* Clean up local GPU library handles */
     if (g_local.NvmlShutdown) g_local.NvmlShutdown();
     if (g_local.h_nvml)   { dlclose(g_local.h_nvml);   g_local.h_nvml = nullptr; }
-    if (g_local.h_cudart) { dlclose(g_local.h_cudart); g_local.h_cudart = nullptr; }
+    /* Release primary contexts before closing driver */
+    for (int i = 0; i < g_local.local_count; i++) {
+        if (g_local.PrimaryCtxRelease && g_local.contexts[i]) {
+            CUdevice dev;
+            if (g_local.DeviceGet) g_local.DeviceGet(&dev, i);
+            else dev = i;
+            g_local.PrimaryCtxRelease(dev);
+            g_local.contexts[i] = nullptr;
+        }
+    }
     if (g_local.h_cuda)   { dlclose(g_local.h_cuda);   g_local.h_cuda = nullptr; }
     g_local.available = false;
 #endif

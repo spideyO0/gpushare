@@ -77,6 +77,13 @@ The client is a shared library (`libgpushare_client.so` / `.dylib` / `.dll`) tha
 - Connection is established lazily on first CUDA call (via `ensure_connected()`)
 - `g_server_caps` is read from the `gs_init_resp_t` during the init handshake and used to select async/chunked transfer paths with automatic fallback to synchronous transfers if the server does not advertise the corresponding capability
 - On Windows, `DllMain` with `DLL_PROCESS_DETACH` calls `detach()` on the recv thread instead of `join()` to avoid a loader lock deadlock during process exit
+- On Linux, `__attribute__((destructor))` cleanup also uses `detach()` instead of `join()` for recv threads, wrapped in `try/catch`, to avoid crashes during static destruction when threads may be partially torn down
+
+**Linker configuration (Linux):**
+
+- `-Wl,-Bsymbolic` prevents PLT interposition. Without this, driver API functions (`cuXxx`) calling runtime API functions (`cudaXxx`) within the library resolve through the PLT to a different library (e.g., PyTorch's bundled `libcudart.so.12`), causing deadlocks. With `-Bsymbolic`, internal calls go directly to our own symbols.
+- A version script (`client/libcudart.version`) tags all exported symbols with `@@libcudart.so.12`. This allows our library to serve as a drop-in replacement for PyTorch's bundled CUDA runtime, satisfying versioned symbol requirements like `cudaGetDeviceCount@libcudart.so.12`.
+- The library exports `__cudaRegisterFatBinary`, `__cudaRegisterFunction`, `__cudaPushCallConfiguration`, and other internal CUDA runtime symbols needed by PyTorch's pre-compiled CUDA kernels.
 
 **Handle mapping:**
 
@@ -116,7 +123,9 @@ The generator produces:
 
 Currently covers cuBLAS (Level 1/2/3 ops, GemmEx, strided batched) and cuDNN (convolution, activation, batch norm, pooling, softmax, dropout).
 
-**Tier 2: Weak symbol stubs (`codegen/parse_headers.py`) -- 2432 functions**
+**Tier 2: Weak symbol stubs (`codegen/parse_headers.py`) -- ~2420 functions (after removing ~33 that conflict with strong definitions in gpushare_client.cpp)**
+
+Install scripts automatically remove conflicting weak stubs before building. The list of 33 conflicting function names is maintained in each install script's `CONFLICTING_STUBS` array.
 
 For functions that do not need deep argument understanding, this script:
 1. Reads actual CUDA header files from `/opt/cuda/include`
@@ -429,6 +438,38 @@ cmake .. -DCUDAToolkit_ROOT=/opt/cuda
 **Root cause:** Windows DLL search order is: application directory, then `System32`, then `PATH`. The real `nvcuda.dll` in `System32` is locked by the NVIDIA display driver and cannot be overwritten or renamed. Even if gpushare's DLL is found first, PyTorch's `c10_cuda.dll` is linked against functions in the real `nvcuda.dll` that gpushare does not export, causing load failures.
 
 **Fix:** Use the Python startup hook (Section 1.9) instead of DLL replacement for PyTorch on Windows. The hook patches PyTorch's CUDA functions at the Python level, avoiding the DLL search order problem entirely.
+
+### Bug 22: PyTorch RPATH loads bundled libcudart.so.12 before system paths
+
+**Symptom:** PyTorch hangs or segfaults during `torch.cuda._lazy_init()` on Linux, even though system symlinks point to gpushare.
+
+**Root cause:** PyTorch's `libc10_cuda.so` has `DT_RPATH` (not `DT_RUNPATH`) pointing to `$ORIGIN/../../nvidia/cuda_runtime/lib/`. `DT_RPATH` is searched BEFORE `LD_LIBRARY_PATH`, so PyTorch always loads its bundled `libcudart.so.12` regardless of system symlinks. The real runtime then calls our fake `libcuda.so.1` driver API, creating a mismatch that causes segfaults (the real runtime tries to use fake contexts our driver returns).
+
+**Fix:** The Linux client install script now replaces PyTorch's bundled `libcudart.so.12` with our library. This works because our library now exports all required versioned symbols (`@@libcudart.so.12`) via a linker version script, including internal symbols like `__cudaRegisterFatBinary` that PyTorch's pre-compiled CUDA code needs.
+
+### Bug 23: cudaGetDeviceCount returns wrong count on first call
+
+**Symptom:** `cudaGetDeviceCount` returns only the remote GPU count (missing local GPUs), or only the local count (missing remote GPUs).
+
+**Root cause:** `cudaGetDeviceCount` read `g_local.local_count` BEFORE calling `ensure_connected()`. But `init_local_gpu()` (which sets `g_local.local_count`) runs inside `ensure_connected()` -> `load_config()`. On the first call, the local count was always 0.
+
+**Fix:** Call `ensure_connected()` FIRST (which triggers `load_config()` -> `init_local_gpu()`), THEN read `g_local.local_count` and `g_total_remote_devices`.
+
+### Bug 24: -Bsymbolic needed to prevent PLT interposition deadlocks
+
+**Symptom:** Driver API functions (`cuDeviceGetCount`) hang when called through PyTorch on Linux.
+
+**Root cause:** `cuDeviceGetCount()` internally calls `cudaGetDeviceCount()`. Without `-Bsymbolic`, this call goes through the PLT and resolves to PyTorch's bundled `libcudart.so.12` (loaded via RPATH) instead of our own implementation. The real runtime's `cudaGetDeviceCount` tries to initialize through our fake driver, creating a deadlock.
+
+**Fix:** Add `-Wl,-Bsymbolic` to the linker flags in CMakeLists.txt. This makes all internal symbol references resolve directly to our own definitions, bypassing PLT interposition.
+
+### Bug 25: Thread cleanup crashes at process exit
+
+**Symptom:** `std::system_error: Invalid argument` or segfault during process exit after using the gpushare client library.
+
+**Root cause:** The `__attribute__((destructor))` cleanup function tried to `join()` the recv thread during process exit. At this point, the thread may be partially torn down or the mutex/thread state corrupted. Also, if `g_servers` vector's static destructor ran before `gpushare_cleanup()`, the `ServerConnection` destructor would try to operate on already-freed memory.
+
+**Fix:** Use the same strategy as Windows `DllMain`: `detach()` recv threads instead of `join()` during cleanup, send CLOSE message, and let the OS clean up. All thread and transport operations are wrapped in `try/catch` blocks.
 
 ---
 
@@ -1186,7 +1227,8 @@ DYLD_LIBRARY_PATH=/usr/local/lib ./your_app
 |------|-------------|
 | `gpushare_client.cpp` | Main client library. Exports CUDA Runtime, Driver, and NVML symbols. Handles connection management, config file reading, request/response serialization. Cross-platform (Linux, macOS, Windows). |
 | `generated_stubs.cpp` | Auto-generated by `generate_stubs.py`. Client-side stubs for Tier 1 functions (133 functions with full argument serialization). |
-| `generated_all_stubs.cpp` | Auto-generated by `parse_headers.py`. Client-side stubs for Tier 2 functions (2432 weak symbol stubs). |
+| `generated_all_stubs.cpp` | Auto-generated by `parse_headers.py`. Client-side stubs for Tier 2 functions (~2420 weak symbol stubs). |
+| `libcudart.version` | Linker version script. Tags all exported symbols with `@@libcudart.so.12` so the library can serve as a drop-in replacement for PyTorch's bundled CUDA runtime. |
 | `gpu_tray_windows.pyw` | Windows system tray widget. Uses pystray + pillow. Shows GPU stats (temp, utilization, VRAM) via hover tooltip. Communicates with server via raw socket protocol. |
 
 ### `codegen/`
