@@ -749,14 +749,18 @@ def install():
         return
 
     # Phase 1: Discover GPUs via ctypes (fast, no network)
-    try:
-        _query_devices_ctypes()
-    except Exception:
-        pass
+    # SKIP on Windows: ctypes.CDLL loads our DLL from a different path than
+    # torch\lib\nvcuda.dll, creating TWO DLL instances with separate static
+    # state. The second instance's RPC hangs. Use TCP fallback instead.
+    if sys.platform != 'win32':
+        try:
+            _query_devices_ctypes()
+        except Exception:
+            pass
 
     # Phase 2: If no remote GPUs found via ctypes, try direct TCP to server.
     # This is essential for:
-    #   - Windows with local GPU (nvcuda.dll is real NVIDIA, not ours)
+    #   - Windows (always — to avoid dual DLL instance issue)
     #   - Server machine (libcuda.so.1 is the real driver)
     #   - Any system where our C library isn't installed as the CUDA driver
     has_remote = any(d.get('is_remote') for d in _devices)
