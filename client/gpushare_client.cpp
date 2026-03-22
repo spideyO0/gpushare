@@ -1182,12 +1182,17 @@ static bool ensure_connected() {
     std::lock_guard<std::recursive_mutex> lock(g_connect_mtx);
     if (!g_servers.empty()) return true;  /* double-check after lock */
 
+    fprintf(stderr, "[gpushare] ensure_connected: loading config...\n"); fflush(stderr);
     load_config();
 
     /* Re-check: on Windows, load_config() → init_local_gpu() → real cudart →
      * cuInit() re-enters ensure_connected() and may have already connected. */
-    if (!g_servers.empty()) return true;
+    if (!g_servers.empty()) {
+        fprintf(stderr, "[gpushare] ensure_connected: already connected after load_config (re-entrant)\n"); fflush(stderr);
+        return true;
+    }
 
+    fprintf(stderr, "[gpushare] ensure_connected: connecting to servers...\n"); fflush(stderr);
     sock_init();
 
     /* If no servers configured, use default */
