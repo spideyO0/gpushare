@@ -610,7 +610,9 @@ def _do_patch():
     # On Windows with dual-GPU (local + remote), torch._C._cuda_init() can
     # hang because the bundled cudart calls cuInit through our nvcuda.dll,
     # creating a re-entrant initialization chain. When gpushare has already
-    # discovered GPUs, skip the C++ init and mark as initialized directly.
+    # discovered GPUs, we attempt the C++ init in a daemon thread with a
+    # timeout. If it succeeds, great. If it hangs or fails, we mark as
+    # initialized anyway so tensor operations can proceed via our driver.
     if hasattr(tc, '_lazy_init'):
         _orig_lazy_init = tc._lazy_init
         _init_done = [False]
@@ -618,20 +620,31 @@ def _do_patch():
             if _init_done[0]:
                 return
             if _device_count > 0:
-                # gpushare already discovered GPUs — mark initialized without
-                # calling torch._C._cuda_init() (which can hang on Windows)
+                import threading
+                _init_ok = [False]
+                def _try_init():
+                    try:
+                        _orig_lazy_init()
+                        _init_ok[0] = True
+                    except Exception:
+                        pass
+                t = threading.Thread(target=_try_init, daemon=True)
+                t.start()
+                t.join(timeout=5.0)  # 5 second timeout
                 _init_done[0] = True
                 if hasattr(tc, '_initialized'):
                     tc._initialized = True
-                if hasattr(tc, '_queued_calls'):
-                    for fn_and_args in tc._queued_calls:
-                        if callable(fn_and_args):
-                            try: fn_and_args()
-                            except Exception: pass
-                        elif isinstance(fn_and_args, (tuple, list)) and len(fn_and_args) >= 1:
-                            try: fn_and_args[0](*fn_and_args[1:])
-                            except Exception: pass
-                    tc._queued_calls = []
+                if not _init_ok[0]:
+                    # C++ init hung or failed — process queued calls manually
+                    if hasattr(tc, '_queued_calls'):
+                        for fn_and_args in tc._queued_calls:
+                            if callable(fn_and_args):
+                                try: fn_and_args()
+                                except Exception: pass
+                            elif isinstance(fn_and_args, (tuple, list)) and len(fn_and_args) >= 1:
+                                try: fn_and_args[0](*fn_and_args[1:])
+                                except Exception: pass
+                        tc._queued_calls = []
                 return
             try:
                 _orig_lazy_init()
