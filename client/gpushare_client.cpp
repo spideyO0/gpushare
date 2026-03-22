@@ -2232,11 +2232,13 @@ GPUSHARE_EXPORT CUresult cuCtxDestroy_v2(CUcontext ctx) {
 }
 
 GPUSHARE_EXPORT CUresult cuCtxSetCurrent(CUcontext ctx) {
+    fprintf(stderr, "[gpushare] cuCtxSetCurrent(%p)\n", (void*)ctx);
     (void)ctx;
     return CUDA_SUCCESS;
 }
 
 GPUSHARE_EXPORT CUresult cuCtxGetCurrent(CUcontext *pctx) {
+    fprintf(stderr, "[gpushare] cuCtxGetCurrent()\n");
     if (pctx) *pctx = g_fake_ctx;
     return CUDA_SUCCESS;
 }
@@ -2465,7 +2467,7 @@ GPUSHARE_EXPORT CUresult cuDeviceGetProperties(void *prop, CUdevice dev) {
 }
 
 GPUSHARE_EXPORT CUresult cuDevicePrimaryCtxRetain(CUcontext *pctx, CUdevice dev) {
-    TRACE("cuDevicePrimaryCtxRetain(dev=%d)", dev);
+    fprintf(stderr, "[gpushare] cuDevicePrimaryCtxRetain(dev=%d)\n", dev);
     /* Return a unique fake context per device — PyTorch checks context
      * uniqueness and may deadlock if two devices share the same context. */
     if (pctx) *pctx = (CUcontext)(uintptr_t)(0xBADC0DE0 + (unsigned)dev);
