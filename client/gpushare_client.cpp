@@ -2022,6 +2022,8 @@ static CUresult cache_device_props(int dev) {
     }
 
     /* Remote GPU */
+    fprintf(stderr, "[gpushare] cache_device_props(dev=%d) -> RPC (remote_dev=%d, servers=%zu)\n",
+            dev, to_remote_device(dev), g_servers.size());
     gs_device_props_req_t req;
     req.device = to_remote_device(dev);
     std::vector<uint8_t> resp;
@@ -2121,7 +2123,8 @@ GPUSHARE_EXPORT CUresult cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
 }
 
 GPUSHARE_EXPORT CUresult cuDeviceGetAttribute(int *pi, CUdevice_attribute attrib, CUdevice dev) {
-    TRACE("cuDeviceGetAttribute(attr=%d, dev=%d)", (int)attrib, dev);
+    fprintf(stderr, "[gpushare] cuDeviceGetAttribute(attr=%d, dev=%d) servers=%zu\n",
+            (int)attrib, dev, g_servers.size());
     CUresult err = cache_device_props(dev);
     if (err != CUDA_SUCCESS) return err;
     if (!pi) return CUDA_ERROR_INVALID_VALUE;
