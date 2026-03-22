@@ -2038,6 +2038,9 @@ static CUresult cache_device_props(int dev) {
 GPUSHARE_EXPORT CUresult cuInit(unsigned int flags) {
     TRACE("cuInit(%u)", flags);
     (void)flags;
+    /* If already connected, return immediately — avoids re-triggering
+     * ensure_connected() during PyTorch's bundled cudart lazy init. */
+    if (!g_servers.empty()) return CUDA_SUCCESS;
     if (!ensure_connected()) return CUDA_ERROR_NO_DEVICE;
     return CUDA_SUCCESS;
 }
@@ -2462,8 +2465,10 @@ GPUSHARE_EXPORT CUresult cuDeviceGetProperties(void *prop, CUdevice dev) {
 }
 
 GPUSHARE_EXPORT CUresult cuDevicePrimaryCtxRetain(CUcontext *pctx, CUdevice dev) {
-    (void)dev;
-    if (pctx) *pctx = g_fake_ctx;
+    TRACE("cuDevicePrimaryCtxRetain(dev=%d)", dev);
+    /* Return a unique fake context per device — PyTorch checks context
+     * uniqueness and may deadlock if two devices share the same context. */
+    if (pctx) *pctx = (CUcontext)(uintptr_t)(0xBADC0DE0 + (unsigned)dev);
     return CUDA_SUCCESS;
 }
 
