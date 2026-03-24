@@ -1,21 +1,24 @@
 /* Version script for gpushare client library.
  *
- * We use multiple version nodes to satisfy different requirements:
- * 1. libcudart.so.12: required by PyTorch and other CUDA 12 apps.
- * 2. GPUSHARE_1.0: our own unversioned/base symbols for driver/NVML.
+ * CUDA Runtime API (cuda*) gets libcudart.so.12 version.
+ * Driver API and other libraries (cu*, nvml*, etc.) gets GPUSHARE_1.0 version.
  */
 
+/* CUDA Runtime API - must come FIRST so cuda* matches before cu* */
 libcudart.so.12 {
     global:
         cuda*;
         __cuda*;
 };
 
+/* Driver API, NVML, and other libraries */
 GPUSHARE_1.0 {
     global:
         cu*;
         nvml*;
+        nvl*;
         cublas*;
+        cublasLt*;
         cudnn*;
         cufft*;
         curand*;
@@ -23,6 +26,4 @@ GPUSHARE_1.0 {
         cusparse*;
         nvrtc*;
         nvjpeg*;
-    local:
-        *;
-} libcudart.so.12;
+};
