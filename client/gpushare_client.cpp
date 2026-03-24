@@ -75,6 +75,11 @@
 #include "gpushare/transport.h"
 #include "gpushare/compression.h"
 
+/* ── Logging ─────────────────────────────────────────────── */
+static int g_verbose = 0;
+#define TRACE(fmt, ...) do { if (g_verbose) fprintf(stderr, "[gpushare] " fmt "\n", ##__VA_ARGS__); } while(0)
+#define ERR(fmt, ...)   fprintf(stderr, "[gpushare] ERROR: " fmt "\n", ##__VA_ARGS__)
+
 /* Platform-specific dynamic loading for local GPU passthrough */
 #ifndef _WIN32
   #include <dlfcn.h>
@@ -272,15 +277,24 @@ static cudaError_t local_get_device_props(struct cudaDeviceProp *prop, int local
     memset(prop, 0, sizeof(*prop));
 
     CUdevice dev;
-    if (g_local.DeviceGet) g_local.DeviceGet(&dev, local_dev);
-    else dev = local_dev;
+    if (g_local.DeviceGet) {
+        g_local.DeviceGet(&dev, local_dev);
+    } else {
+        dev = (CUdevice)local_dev;
+    }
 
-    if (g_local.DeviceGetName) g_local.DeviceGetName(prop->name, sizeof(prop->name), dev);
-    if (g_local.DeviceTotalMem) g_local.DeviceTotalMem(&prop->totalGlobalMem, dev);
+    if (g_local.DeviceGetName) {
+        g_local.DeviceGetName(prop->name, sizeof(prop->name), dev);
+    }
+    if (g_local.DeviceTotalMem) {
+        g_local.DeviceTotalMem(&prop->totalGlobalMem, dev);
+    }
 
     auto ga = [&](CUdevice_attribute attr) -> int {
         int val = 0;
-        g_local.DeviceGetAttribute(&val, attr, dev);
+        if (g_local.DeviceGetAttribute) {
+            g_local.DeviceGetAttribute(&val, attr, dev);
+        }
         return val;
     };
 
@@ -734,11 +748,6 @@ static void ensure_client_pinned() {
     g_client_pinned.init();
     g_client_pinned_initialized = true;
 }
-
-/* ── Logging ─────────────────────────────────────────────── */
-static int g_verbose = 0;
-#define TRACE(fmt, ...) do { if (g_verbose) fprintf(stderr, "[gpushare] " fmt "\n", ##__VA_ARGS__); } while(0)
-#define ERR(fmt, ...)   fprintf(stderr, "[gpushare] ERROR: " fmt "\n", ##__VA_ARGS__)
 
 /* ── Phase 11: ServerConnection — per-server connection state ── */
 /* Each server gets its own transport, send mutex, recv thread, pending map,

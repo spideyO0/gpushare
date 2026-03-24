@@ -1,6 +1,28 @@
-/* Version script: export all symbols under the libcudart.so.12 version tag.
- * This allows our library to satisfy torch's versioned symbol requirements
- * when loaded as libcudart.so.12 (via symlink). */
+/* Version script for gpushare client library.
+ *
+ * We use multiple version nodes to satisfy different requirements:
+ * 1. libcudart.so.12: required by PyTorch and other CUDA 12 apps.
+ * 2. GPUSHARE_1.0: our own unversioned/base symbols for driver/NVML.
+ */
+
 libcudart.so.12 {
-    global: *;
+    global:
+        cuda*;
+        __cuda*;
 };
+
+GPUSHARE_1.0 {
+    global:
+        cu*;
+        nvml*;
+        cublas*;
+        cudnn*;
+        cufft*;
+        curand*;
+        cusolver*;
+        cusparse*;
+        nvrtc*;
+        nvjpeg*;
+    local:
+        *;
+} libcudart.so.12;
