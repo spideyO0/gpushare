@@ -481,19 +481,35 @@ else
     info "Skipping build (--skip-build)"
 fi
 
-[[ -e "$BUILD_DIR/libgpushare_client.so" ]] || die "Build artifact missing: $BUILD_DIR/libgpushare_client.so"
-ok "Client library verified"
+# Find the actual built library (could be .so.1.0.0 or just .so)
+BUILD_LIB=""
+for f in "$BUILD_DIR/libgpushare_client.so.1.0.0" "$BUILD_DIR/libgpushare_client.so.1" "$BUILD_DIR/libgpushare_client.so"; do
+    if [[ -f "$f" ]]; then
+        BUILD_LIB="$f"
+        break
+    fi
+done
+[[ -n "$BUILD_LIB" ]] || die "Build artifact missing: $BUILD_DIR/libgpushare_client.so*"
+ok "Client library verified: $BUILD_LIB"
 
 # ── 3. Install library ───────────────────────────────────────────────────────
 info "Installing client library..."
 mkdir -p "$LIB_DIR"
 LIB_UPDATED=false
-if [[ "$IS_UPGRADE" == true ]] && cmp -s "$BUILD_DIR/libgpushare_client.so" "$LIB_DIR/libgpushare_client.so"; then
+INSTALLED_LIB="$LIB_DIR/libgpushare_client.so.1.0.0"
+
+if [[ "$IS_UPGRADE" == true ]] && cmp -s "$BUILD_LIB" "$INSTALLED_LIB"; then
     ok "Client library unchanged — skipping"
 else
-    install -Dm755 "$BUILD_DIR/libgpushare_client.so" "$LIB_DIR/libgpushare_client.so"
+    # Install the actual library file with version suffix
+    install -Dm755 "$BUILD_LIB" "$INSTALLED_LIB"
     LIB_UPDATED=true
-    ok "Installed $LIB_DIR/libgpushare_client.so"
+    ok "Installed $INSTALLED_LIB"
+    
+    # Create versioned symlinks
+    ln -sf "libgpushare_client.so.1.0.0" "$LIB_DIR/libgpushare_client.so.1"
+    ln -sf "libgpushare_client.so.1.0.0" "$LIB_DIR/libgpushare_client.so"
+    ok "Created versioned symlinks"
 fi
 
 # ── 3b. Backup real CUDA libraries for local GPU passthrough ─────────────────

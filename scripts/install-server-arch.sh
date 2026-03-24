@@ -62,15 +62,21 @@ SKIP_BUILD=false
 SKIP_FIREWALL=false
 NO_ENABLE=false
 FORCE_REINSTALL=false
+
 for arg in "$@"; do
     case "$arg" in
-        --skip-build)    SKIP_BUILD=true ;;
-        --skip-firewall) SKIP_FIREWALL=true ;;
-        --no-enable)     NO_ENABLE=true ;;
-        --force)         FORCE_REINSTALL=true ;;
+        --skip-build)      SKIP_BUILD=true ;;
+        --skip-firewall)   SKIP_FIREWALL=true ;;
+        --no-enable)       NO_ENABLE=true ;;
+        --force)           FORCE_REINSTALL=true ;;
         *) die "Unknown option: $arg (try --help)" ;;
     esac
 done
+
+# ── Root check ────────────────────────────────────────────────────────────────
+if [[ $EUID -ne 0 ]]; then
+    die "This script must be run as root (sudo $0)"
+fi
 
 # ── Root check ────────────────────────────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
@@ -203,9 +209,34 @@ else
     info "Skipping build (--skip-build)"
 fi
 
+# Find the actual built library (could be .so.1.0.0 or just .so)
+find_build_lib() {
+    local candidates=(
+        "$BUILD_DIR/libgpushare_client.so.1.0.0"
+        "$BUILD_DIR/libgpushare_client.so.1"
+        "$BUILD_DIR/libgpushare_client.so"
+    )
+    for f in "${candidates[@]}"; do
+        if [[ -f "$f" ]]; then
+            echo "$f"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Verify artifacts
 [[ -f "$BUILD_DIR/gpushare-server" ]]          || die "Build artifact missing: $BUILD_DIR/gpushare-server"
-[[ -e "$BUILD_DIR/libgpushare_client.so" ]]    || die "Build artifact missing: $BUILD_DIR/libgpushare_client.so"
+
+# Find the actual built library (could be .so.1.0.0 or just .so)
+BUILD_LIB=""
+for f in "$BUILD_DIR/libgpushare_client.so.1.0.0" "$BUILD_DIR/libgpushare_client.so.1" "$BUILD_DIR/libgpushare_client.so"; do
+    if [[ -f "$f" ]]; then
+        BUILD_LIB="$f"
+        break
+    fi
+done
+[[ -n "$BUILD_LIB" ]] || die "Build artifact missing: $BUILD_DIR/libgpushare_client.so*"
 ok "Build artifacts verified"
 
 # ── 3. Install binary ────────────────────────────────────────────────────────
@@ -218,13 +249,19 @@ else
 fi
 
 # Also install client library on the server (useful for local testing)
-# Resolve symlinks to get the actual .so file
-REAL_SO="$(readlink -f "$BUILD_DIR/libgpushare_client.so")"
-if [[ "$IS_UPGRADE" == true ]] && cmp -s "$REAL_SO" /usr/local/lib/gpushare/libgpushare_client.so; then
+LIB_DIR="/usr/local/lib/gpushare"
+INSTALLED_LIB="$LIB_DIR/libgpushare_client.so.1.0.0"
+
+if [[ "$IS_UPGRADE" == true ]] && cmp -s "$BUILD_LIB" "$INSTALLED_LIB"; then
     ok "Client library unchanged — skipping"
 else
-    install -Dm755 "$REAL_SO" /usr/local/lib/gpushare/libgpushare_client.so
-    ok "Installed /usr/local/lib/gpushare/libgpushare_client.so"
+    install -Dm755 "$BUILD_LIB" "$INSTALLED_LIB"
+    ok "Installed $INSTALLED_LIB"
+    
+    # Create versioned symlinks
+    ln -sf "libgpushare_client.so.1.0.0" "$LIB_DIR/libgpushare_client.so.1"
+    ln -sf "libgpushare_client.so.1.0.0" "$LIB_DIR/libgpushare_client.so"
+    ok "Created versioned symlinks"
 fi
 
 # ── 3b. Backup real CUDA libs + create symlinks for dual-GPU support ─────────
