@@ -273,15 +273,30 @@ static CUresult local_set_ctx(int local_dev) {
 /* Fill a cudaDeviceProp struct from driver API queries for a local device.
  * Linux only — Windows uses the runtime API (g_local.GetDeviceProperties). */
 static cudaError_t local_get_device_props(struct cudaDeviceProp *prop, int local_dev) {
-    if (!prop || !g_local.DeviceGetAttribute) return cudaErrorInvalidValue;
+    fprintf(stderr, "[gpushare] local_get_device_props: local_dev=%d\n", local_dev);
+    fflush(stderr);
+    if (!prop) {
+        fprintf(stderr, "[gpushare] local_get_device_props: prop is NULL\n");
+        fflush(stderr);
+        return cudaErrorInvalidValue;
+    }
+    if (!g_local.DeviceGetAttribute) {
+        fprintf(stderr, "[gpushare] local_get_device_props: DeviceGetAttribute is NULL\n");
+        fflush(stderr);
+        return cudaErrorInvalidValue;
+    }
     memset(prop, 0, sizeof(*prop));
 
     CUdevice dev;
     if (g_local.DeviceGet) {
+        fprintf(stderr, "[gpushare] local_get_device_props: calling DeviceGet\n");
+        fflush(stderr);
         g_local.DeviceGet(&dev, local_dev);
     } else {
         dev = (CUdevice)local_dev;
     }
+    fprintf(stderr, "[gpushare] local_get_device_props: got dev=%d\n", (int)dev);
+    fflush(stderr);
 
     if (g_local.DeviceGetName) {
         g_local.DeviceGetName(prop->name, sizeof(prop->name), dev);
