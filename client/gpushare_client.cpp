@@ -272,75 +272,31 @@ static CUresult local_set_ctx(int local_dev) {
 
 /* Fill a cudaDeviceProp struct from driver API queries for a local device.
  * Linux only — Windows uses the runtime API (g_local.GetDeviceProperties). */
-static bool g_in_get_device_props = false;
-
 static cudaError_t local_get_device_props(struct cudaDeviceProp *prop, int local_dev) {
-    fprintf(stderr, "[gpushare] local_get_device_props: local_dev=%d\n", local_dev);
-    fflush(stderr);
-    if (!prop) {
-        fprintf(stderr, "[gpushare] local_get_device_props: prop is NULL\n");
-        fflush(stderr);
-        return cudaErrorInvalidValue;
-    }
-
-    /* Prevent recursion if we call ourselves via runtime API */
-    if (g_in_get_device_props) {
-        fprintf(stderr, "[gpushare] local_get_device_props: RECURSION DETECTED, using defaults\n");
-        fflush(stderr);
-        memset(prop, 0, sizeof(*prop));
-        strncpy(prop->name, "NVIDIA GeForce GTX 1650", sizeof(prop->name) - 1);
-        prop->totalGlobalMem = 4096000000ULL;
-        prop->major = 7;
-        prop->minor = 5;
-        return cudaSuccess;
-    }
-
-    /* Skip driver API queries - they crash. Use defaults. */
-    fprintf(stderr, "[gpushare] local_get_device_props: using defaults (driver API crashes)\n");
-    fflush(stderr);
-
-    if (!g_local.DeviceGetAttribute) {
-        fprintf(stderr, "[gpushare] local_get_device_props: DeviceGetAttribute is NULL\n");
-        fflush(stderr);
-        return cudaErrorInvalidValue;
-    }
+    if (!prop) return cudaErrorInvalidValue;
     memset(prop, 0, sizeof(*prop));
-
-    CUdevice dev;
+    
+    /* Get name */
+    CUdevice dev = (CUdevice)local_dev;
     if (g_local.DeviceGet) {
-        fprintf(stderr, "[gpushare] local_get_device_props: calling DeviceGet\n");
-        fflush(stderr);
         g_local.DeviceGet(&dev, local_dev);
-        fprintf(stderr, "[gpushare] local_get_device_props: after DeviceGet\n");
-        fflush(stderr);
-    } else {
-        dev = (CUdevice)local_dev;
     }
-    fprintf(stderr, "[gpushare] local_get_device_props: got dev=%d\n", (int)dev);
-    fflush(stderr);
-
     if (g_local.DeviceGetName) {
-        fprintf(stderr, "[gpushare] local_get_device_props: calling DeviceGetName\n");
-        fflush(stderr);
         g_local.DeviceGetName(prop->name, sizeof(prop->name), dev);
-        fprintf(stderr, "[gpushare] local_get_device_props: after DeviceGetName\n");
-        fflush(stderr);
     }
     if (g_local.DeviceTotalMem) {
-        fprintf(stderr, "[gpushare] local_get_device_props: calling DeviceTotalMem\n");
-        fflush(stderr);
         g_local.DeviceTotalMem(&prop->totalGlobalMem, dev);
-        fprintf(stderr, "[gpushare] local_get_device_props: after DeviceTotalMem\n");
-        fflush(stderr);
     }
-
-    fprintf(stderr, "[gpushare] local_get_device_props: querying attributes...\n");
-    fflush(stderr);
-
-    /* Driver API crashes - use defaults only */
-    fprintf(stderr, "[gpushare] local_get_device_props: using defaults (driver API crashes)\n");
-    fflush(stderr);
-
+    
+    /* Query attributes */
+    auto ga = [&](CUdevice_attribute attr) -> int {
+        int val = 0;
+        if (g_local.DeviceGetAttribute) {
+            g_local.DeviceGetAttribute(&val, attr, dev);
+        }
+        return val;
+    };
+    
     prop->sharedMemPerBlock     = 49152;
     prop->regsPerBlock          = 65536;
     prop->warpSize              = 32;
@@ -378,8 +334,6 @@ static cudaError_t local_get_device_props(struct cudaDeviceProp *prop, int local
     prop->maxBlocksPerMultiProcessor = 16;
     prop->pageableMemoryAccess  = 1;
 
-    fprintf(stderr, "[gpushare] local_get_device_props: returning cudaSuccess\n");
-    fflush(stderr);
     return cudaSuccess;
 }
 #endif /* !_WIN32 */
@@ -1389,86 +1343,21 @@ GPUSHARE_EXPORT cudaError_t cudaGetDeviceCount(int *count) {
 
 GPUSHARE_EXPORT cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop, int device) {
     TRACE("cudaGetDeviceProperties(%d)", device);
-    fflush(stderr);
-
-    /* If active device is remote, route ALL queries to remote to avoid driver API crashes */
-    bool should_route_remote = (!g_local.available || is_remote_device(g_active_device)) && !g_servers.empty();
-    if (should_route_remote) {
-        fprintf(stderr, "[gpushare] cudaGetDeviceProperties: active is remote, routing to server\n");
-        fflush(stderr);
-        gs_device_props_req_t req;
-        req.device = to_remote_device(g_active_device);
-        std::vector<uint8_t> resp;
-        if (!rpc_call(GS_OP_GET_DEVICE_PROPS, &req, sizeof(req), resp)) return cudaErrorUnknown;
-        if (resp.size() < sizeof(gs_device_props_t)) return cudaErrorUnknown;
-        auto *r = (const gs_device_props_t*)resp.data();
-        if (prop) {
-            memset(prop, 0, sizeof(*prop));
-            strncpy(prop->name, r->name, sizeof(prop->name) - 1);
-            size_t len = strlen(prop->name);
-            if (len + 10 < sizeof(prop->name))
-                strcat(prop->name, " (remote)");
-            prop->totalGlobalMem     = r->total_global_mem;
-            prop->sharedMemPerBlock  = r->shared_mem_per_block;
-            prop->regsPerBlock       = r->regs_per_block;
-            prop->warpSize           = r->warp_size;
-            prop->maxThreadsPerBlock = r->max_threads_per_block;
-            prop->maxThreadsDim[0]   = r->max_threads_dim[0];
-            prop->maxThreadsDim[1]   = r->max_threads_dim[1];
-            prop->maxThreadsDim[2]   = r->max_threads_dim[2];
-            prop->maxGridSize[0]     = r->max_grid_size[0];
-            prop->maxGridSize[1]     = r->max_grid_size[1];
-            prop->maxGridSize[2]     = r->max_grid_size[2];
-            prop->clockRate          = r->clock_rate;
-            prop->major              = r->major;
-            prop->minor              = r->minor;
-            prop->multiProcessorCount= r->multi_processor_count;
-            prop->maxThreadsPerMultiProcessor = r->max_threads_per_mp;
-            prop->totalConstMem      = r->total_const_mem;
-            prop->memoryBusWidth     = (int)r->mem_bus_width;
-            prop->l2CacheSize        = (int)r->l2_cache_size;
-            prop->canMapHostMemory   = 1;
-            prop->concurrentKernels  = 1;
-            prop->unifiedAddressing   = 1;
-        }
-        fprintf(stderr, "[gpushare] cudaGetDeviceProperties: returning remote props\n");
-        fflush(stderr);
-        return cudaSuccess;
-    }
 
     /* Local GPU — query via real driver/runtime API */
-    fprintf(stderr, "[gpushare] cudaGetDeviceProperties: local_avail=%d is_remote=%d device=%d\n",
-            g_local.available ? 1 : 0, is_remote_device(device) ? 1 : 0, device);
-    fflush(stderr);
     if (g_local.available && !is_remote_device(device)) {
-        fprintf(stderr, "[gpushare] cudaGetDeviceProperties: querying LOCAL device\n");
-        fflush(stderr);
-        /* Activate local CUDA context for this device */
-        local_set_ctx(to_local_device(device));
 #ifdef _WIN32
         if (g_local.GetDeviceProperties) {
             cudaError_t err = g_local.GetDeviceProperties(prop, to_local_device(device));
 #else
         {
-            fprintf(stderr, "[gpushare] cudaGetDeviceProperties: calling local_get_device_props\n");
-            fflush(stderr);
             cudaError_t err = local_get_device_props(prop, to_local_device(device));
-            fprintf(stderr, "[gpushare] cudaGetDeviceProperties: local_get_device_props returned %d\n", err);
-            fflush(stderr);
 #endif
             if (err == cudaSuccess && prop) {
-                fprintf(stderr, "[gpushare] cudaGetDeviceProperties: appending (local) to name\n");
-                fflush(stderr);
                 size_t len = strlen(prop->name);
-                fprintf(stderr, "[gpushare] cudaGetDeviceProperties: name len=%zu\n", len);
-                fflush(stderr);
                 if (len + 8 < sizeof(prop->name))
                     strcat(prop->name, " (local)");
             }
-            fprintf(stderr, "[gpushare] cudaGetDeviceProperties: returning err=%d\n", err);
-            fflush(stderr);
-            fprintf(stderr, "[gpushare] cudaGetDeviceProperties: EXITING\n");
-            fflush(stderr);
             return err;
         }
     }
