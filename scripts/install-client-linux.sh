@@ -1049,8 +1049,9 @@ if [[ "$NO_SYMLINKS" == false ]] && [[ "$LIB_UPDATED" == true || "$FORCE_REINSTA
         # pyenv installations
         $HOME/.pyenv/versions/*/lib/python3*/site-packages
         $HOME/.pyenv/shims/*/lib/python*/site-packages
-        # User installs
+        # User installs (explicit paths for pip --user installs)
         $HOME/.local/lib/python3.*/site-packages
+        $HOME/.local/lib/python3*/site-packages
         # conda environments
         $HOME/miniconda3/envs/*/lib/python*/site-packages
         $HOME/anaconda3/envs/*/lib/python*/site-packages
@@ -1063,10 +1064,13 @@ if [[ "$NO_SYMLINKS" == false ]] && [[ "$LIB_UPDATED" == true || "$FORCE_REINSTA
         $HOME/.local/share/jupyter/runtime/*/site-packages
     )
 
-    # PyTorch CUDA library patterns to replace
+    # PyTorch CUDA library patterns to replace (newer PyTorch uses nvidia/cuXX)
     TORCH_LIB_PATTERNS=(
         "nvidia/cuda_runtime/lib/libcudart.so.12"
+        "nvidia/cuda_runtime/lib/libcudart.so.13"
         "nvidia/cuda_runtime/lib/libcuda.so.1"
+        "nvidia/cu12/lib/libcudart.so.12"
+        "nvidia/cu13/lib/libcudart.so.13"
         "nvidia/cudnn/lib/libcudnn.so.8"
         "nvidia/cudnn/lib/libcudnn.so.9"
         "torch/lib/cudart/cuda-runtime/lib/libcudart.so.12"
