@@ -836,7 +836,172 @@ AAEOF
     fi
 fi
 
-# ── 8. Install Python client + startup hook ───────────────────────────────────
+# ── Detect and manage Python environments ─────────────────────────────────────
+detect_python_environments() {
+    local envs=()
+    local active_env=""
+
+    # Check if a Python environment is currently activated
+    if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+        active_env="$VIRTUAL_ENV"
+        envs+=("VIRTUAL_ENV:$VIRTUAL_ENV")
+    fi
+    if [[ -n "${CONDA_PREFIX:-}" ]]; then
+        active_env="$CONDA_PREFIX"
+        envs+=("CONDA:$CONDA_PREFIX")
+    fi
+
+    # pyenv
+    if [[ -d "$HOME/.pyenv" ]]; then
+        local pyenv_path="$HOME/.pyenv/bin"
+        if [[ ":$PATH:" != *":$pyenv_path:"* ]]; then
+            envs+=("pyenv:$pyenv_path")
+        fi
+    fi
+
+    # conda
+    local conda_paths=(
+        "$HOME/miniconda3"
+        "$HOME/anaconda3"
+        "$HOME/opt/miniconda3"
+        "$HOME/opt/anaconda3"
+        "/opt/miniconda3"
+        "/opt/anaconda3"
+    )
+    for conda_path in "${conda_paths[@]}"; do
+        if [[ -d "$conda_path" ]]; then
+            local conda_bin="$conda_path/bin"
+            if [[ ":$PATH:" != *":$conda_bin:"* ]]; then
+                envs+=("conda:$conda_bin")
+            fi
+            break
+        fi
+    done
+
+    # virtualenvwrapper
+    if [[ -d "$HOME/.virtualenvs" ]]; then
+        envs+=("virtualenvwrapper:$HOME/.virtualenvs")
+    fi
+
+    # venv
+    for venv_dir in "$HOME/*/venv" "$HOME/*/.venv" "$HOME/venv" "$HOME/.venv"; do
+        if [[ -d "$venv_dir" ]]; then
+            local venv_bin="$venv_dir/bin"
+            if [[ -d "$venv_bin" ]]; then
+                envs+=("venv:$venv_bin")
+            fi
+        fi
+    done
+
+    printf '%s\n' "${envs[@]}"
+}
+
+manage_ld_preload() {
+    local preload_lib="$LIB_DIR/libgpushare_client.so"
+    local preload_path="$preload_lib"
+    local added=0
+    local corrected=0
+    local skipped=0
+    local p
+    local f
+
+    info "Configuring LD_PRELOAD in shell profiles..."
+
+    for f in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zshrc" "$HOME/.zprofile"; do
+        if [[ -f "$f" ]]; then
+            if grep -q 'LD_PRELOAD.*'"$preload_path" "$f" 2>/dev/null; then
+                skipped=$((skipped + 1))
+            else
+                echo "" >> "$f"
+                echo "# gpushare - set LD_PRELOAD to use remote GPU" >> "$f"
+                echo "export LD_PRELOAD=\"$preload_path\"" >> "$f"
+                added=$((added + 1))
+            fi
+        fi
+    done
+
+    if [[ -f /etc/environment ]]; then
+        if grep -q "$preload_path" /etc/environment 2>/dev/null; then
+            skipped=$((skipped + 1))
+        else
+            echo "LD_PRELOAD=\"$preload_path\"" >> /etc/environment
+            added=$((added + 1))
+        fi
+    fi
+
+    ok "LD_PRELOAD configured: $added added, $skipped already configured"
+}
+
+manage_python_path() {
+    info "Checking PATH for Python environments..."
+    local modified=0
+    local env_str
+    local env_type
+    local env_path
+    local p
+
+    env_str=$(detect_python_environments)
+    if [[ -z "$env_str" ]]; then
+        info "No additional Python environments detected"
+        return
+    fi
+
+    for env_info in $env_str; do
+        env_type="${env_info%%:*}"
+        env_path="${env_info#*:}"
+
+        case "$env_type" in
+            pyenv)
+                p="$HOME/.bashrc"
+                if [[ -f "$p" ]] && ! grep -q 'pyenv init' "$p" 2>/dev/null; then
+                    echo "" >> "$p"
+                    echo "# gpushare - pyenv initialization" >> "$p"
+                    echo 'export PYENV_ROOT="'"$env_path"'/../"' >> "$p"
+                    echo '[[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"' >> "$p"
+                    ok "  Added pyenv to $p"
+                    modified=1
+                fi
+                ;;
+            conda)
+                p="$HOME/.bashrc"
+                if [[ -f "$p" ]] && ! grep -q "$env_path" "$p" 2>/dev/null; then
+                    echo "" >> "$p"
+                    echo "# gpushare - conda initialization" >> "$p"
+                    echo 'export PATH="'"$env_path"':$PATH"' >> "$p"
+                    ok "  Added conda to $p"
+                    modified=1
+                fi
+                ;;
+            virtualenvwrapper)
+                p="$HOME/.bashrc"
+                if [[ -f "$p" ]] && ! grep -q 'virtualenvwrapper' "$p" 2>/dev/null; then
+                    echo "" >> "$p"
+                    echo "# gpushare - virtualenvwrapper initialization" >> "$p"
+                    echo 'export WORKON_HOME="$HOME/.virtualenvs"' >> "$p"
+                    ok "  Added virtualenvwrapper to $p"
+                    modified=1
+                fi
+                ;;
+            VIRTUAL_ENV|venv)
+                info "  $env_type detected (use 'source venv/bin/activate')"
+                ;;
+        esac
+    done
+
+    if [[ $modified -gt 0 ]]; then
+        ok "PATH configuration updated for Python environments"
+        warn "Please restart your shell or run: source ~/.bashrc"
+    else
+        ok "Python environment PATH already configured"
+    fi
+}
+
+# ── 8. Manage PATH and LD_PRELOAD for Python environments ────────────────────
+info "Configuring PATH and LD_PRELOAD for Python environments..."
+manage_python_path
+manage_ld_preload
+
+# ── 9. Install Python client + startup hook ────────────────────────────────────
 if [[ "$SKIP_PYTHON" == false ]]; then
     if command -v python3 >/dev/null 2>&1 && command -v pip3 >/dev/null 2>&1; then
         info "Installing Python client package..."
@@ -862,7 +1027,7 @@ else
     info "Skipping Python client (--skip-python)"
 fi
 
-# ── 8b. Replace PyTorch's bundled CUDA libraries ───────────────────────────────
+# ── 10. Replace PyTorch's bundled CUDA libraries ───────────────────────────────
 # PyTorch bundles multiple CUDA libraries that need replacement:
 # - libcudart.so.12 (CUDA Runtime)
 # - libcuda.so.1 (CUDA Driver)
@@ -941,7 +1106,7 @@ if [[ "$NO_SYMLINKS" == false ]] && [[ "$LIB_UPDATED" == true || "$FORCE_REINSTA
     fi
 fi
 
-# ── 9. Systemd user service for dashboard ────────────────────────────────────
+# ── 11. Systemd user service for dashboard ────────────────────────────────────
 # Systemd is not available on all distros (e.g., Alpine with OpenRC, Void with runit)
 if command -v systemctl >/dev/null 2>&1; then
     info "Checking systemd user service for dashboard..."
@@ -977,7 +1142,7 @@ else
     info "You can run the dashboard manually: python3 $SHARE_DIR/dashboard/app.py"
 fi
 
-# ── 10. Patch ML frameworks ──────────────────────────────────────────────────
+# ── 12. Patch ML frameworks ──────────────────────────────────────────────────
 if command -v python3 >/dev/null 2>&1; then
     info "Patching ML frameworks (PyTorch/TensorFlow/JAX) if installed..."
     python3 "$PROJECT_DIR/scripts/gpushare-patch-frameworks.py" 2>/dev/null || true
@@ -990,7 +1155,7 @@ PEOF
     ok "Installed gpushare-patch command"
 fi
 
-# ── 11. Summary ──────────────────────────────────────────────────────────────
+# ── 13. Summary ──────────────────────────────────────────────────────────────
 if [[ "$IS_UPGRADE" == true ]]; then
     RESULT_VERB="upgraded"
 else
