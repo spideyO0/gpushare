@@ -903,14 +903,12 @@ manage_ld_preload() {
     local preload_lib="$LIB_DIR/libgpushare_client.so"
     local preload_path="$preload_lib"
     local added=0
-    local corrected=0
     local skipped=0
-    local p
-    local f
 
-    info "Configuring LD_PRELOAD in shell profiles..."
+    info "Configuring LD_PRELOAD in shell profiles and system-wide..."
 
-    for f in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zshrc" "$HOME/.zprofile"; do
+    # Add to user's shell profiles
+    for f in "$REAL_HOME/.bashrc" "$REAL_HOME/.bash_profile" "$REAL_HOME/.profile" "$REAL_HOME/.zshrc" "$REAL_HOME/.zprofile"; do
         if [[ -f "$f" ]]; then
             if grep -q 'LD_PRELOAD.*'"$preload_path" "$f" 2>/dev/null; then
                 skipped=$((skipped + 1))
@@ -923,6 +921,20 @@ manage_ld_preload() {
         fi
     done
 
+    # Add system-wide to /etc/profile.d/ (applies to all users immediately)
+    if [[ -d /etc/profile.d ]]; then
+        local profile_script="/etc/profile.d/gpushare.sh"
+        if [[ ! -f "$profile_script" ]] || ! grep -q "$preload_path" "$profile_script" 2>/dev/null; then
+            echo "#!/bin/bash" > "$profile_script"
+            echo "export LD_PRELOAD=\"$preload_path\"" >> "$profile_script"
+            chmod 644 "$profile_script"
+            added=$((added + 1))
+        else
+            skipped=$((skipped + 1))
+        fi
+    fi
+
+    # Also add to /etc/environment for system-wide (login managers, systemd)
     if [[ -f /etc/environment ]]; then
         if grep -q "$preload_path" /etc/environment 2>/dev/null; then
             skipped=$((skipped + 1))
