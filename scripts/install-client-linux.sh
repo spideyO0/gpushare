@@ -1089,15 +1089,12 @@ if [[ "$NO_SYMLINKS" == false ]]; then
             for lib_file in "$nvidia_dir"/*.so*; do
                 [[ -f "$lib_file" ]] || continue
 
-                # Skip if already replaced
-                if nm -D "$lib_file" 2>/dev/null | grep -q '__cudaRegisterFatBinary\|__cudaPushCallConfiguration'; then
-                    continue
+                # Back up original if not already backed up
+                if [[ ! -f "${lib_file}.real" ]]; then
+                    cp "$lib_file" "${lib_file}.real" 2>/dev/null || true
                 fi
 
-                # Back up original
-                [[ -f "${lib_file}.real" ]] || cp "$lib_file" "${lib_file}.real" 2>/dev/null || true
-
-                # Replace with gpushare library
+                # Always replace with gpushare library (overwrites previous replacement too)
                 cp "$LIB_DIR/libgpushare_client.so.1.0.0" "$lib_file" 2>/dev/null || true
                 chmod 644 "$lib_file" 2>/dev/null || true
                 TORCH_LIBS_REPLACED=$((TORCH_LIBS_REPLACED + 1))
@@ -1106,13 +1103,9 @@ if [[ "$NO_SYMLINKS" == false ]]; then
     done
 
     if [[ $TORCH_LIBS_REPLACED -gt 0 ]]; then
-        info "Replaced $TORCH_LIBS_REPLACED PyTorch CUDA library files"
-    fi
-
-    if [[ $TORCH_LIBS_REPLACED -gt 0 ]]; then
-        ok "Replaced $TORCH_LIBS_REPLACED PyTorch bundled CUDA libraries with gpushare"
+        ok "Replaced $TORCH_LIBS_REPLACED PyTorch CUDA library files with gpushare"
     else
-        info "No PyTorch installations found (non-fatal)"
+        info "No PyTorch CUDA libraries found to replace"
     fi
 fi
 
