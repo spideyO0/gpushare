@@ -20,6 +20,9 @@ CONF_DIR=/etc/gpushare
 BIN_DIR=/usr/local/bin
 SHARE_DIR=/usr/local/share/gpushare
 
+# Get actual user home (in case running with sudo)
+REAL_HOME="${SUDO_HOME:-$HOME}"
+
 # ── Colors ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -1034,7 +1037,7 @@ install_python_hooks() {
 
     # Find all site-packages directories
     local all_site_dirs
-    all_site_dirs=$(find /usr/lib /usr/local/lib "$HOME/.local/lib" "$HOME/.pyenv/versions" "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/.virtualenvs" -maxdepth 4 -type d -name "site-packages" 2>/dev/null || true)
+    all_site_dirs=$(find /usr/lib /usr/local/lib "$REAL_HOME/.local/lib" "$REAL_HOME/.pyenv/versions" "$REAL_HOME/miniconda3" "$REAL_HOME/anaconda3" "$REAL_HOME/.virtualenvs" -maxdepth 4 -type d -name "site-packages" 2>/dev/null || true)
 
     for sp_dir in $all_site_dirs; do
         if [[ -d "$sp_dir" ]]; then
@@ -1071,7 +1074,8 @@ if [[ "$NO_SYMLINKS" == false ]] && [[ "$LIB_UPDATED" == true || "$FORCE_REINSTA
 
     # Find all site-packages directories with potential PyTorch CUDA libs
     # Use find to properly expand wildcards
-    SITE_PACKAGES_DIRS=$(find /usr/lib /usr/local/lib "$HOME/.local/lib" "$HOME/.pyenv/versions" "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/.virtualenvs" -maxdepth 4 -type d -name "site-packages" 2>/dev/null || true)
+    info "Searching in: $REAL_HOME/.local/lib"
+    SITE_PACKAGES_DIRS=$(find /usr/lib /usr/local/lib "$REAL_HOME/.local/lib" "$REAL_HOME/.pyenv/versions" "$REAL_HOME/miniconda3" "$REAL_HOME/anaconda3" "$REAL_HOME/.virtualenvs" -maxdepth 4 -type d -name "site-packages" 2>/dev/null || true)
 
     # PyTorch CUDA library patterns to replace (newer PyTorch uses nvidia/cuXX)
     TORCH_LIB_PATTERNS=(
