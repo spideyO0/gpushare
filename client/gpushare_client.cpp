@@ -1263,7 +1263,8 @@ static bool ensure_connected() {
     /* Phase 5: Initialize client-side pinned buffer pool */
     ensure_client_pinned();
 
-    TRACE("Connected to %zu server(s), %d remote GPU(s)", g_servers.size(), g_total_remote_devices);
+    fprintf(stderr, "[gpushare] ensure_connected: DONE - servers=%zu, remote_devs=%d\n", g_servers.size(), g_total_remote_devices);
+    fflush(stderr);
     return true;
 }
 
@@ -1323,6 +1324,8 @@ extern "C" {
 
 GPUSHARE_EXPORT cudaError_t cudaGetDeviceCount(int *count) {
     TRACE("cudaGetDeviceCount");
+    fprintf(stderr, "[gpushare] cudaGetDeviceCount: ENTER\n");
+    fflush(stderr);
     
     // Force connection if not already done
     static bool first_call = true;
@@ -1346,6 +1349,8 @@ GPUSHARE_EXPORT cudaError_t cudaGetDeviceCount(int *count) {
     }
     
     if (count) *count = total;
+    fprintf(stderr, "[gpushare] cudaGetDeviceCount: returning %d\n", total);
+    fflush(stderr);
     return total > 0 ? cudaSuccess : cudaErrorNoDevice;
 }
 
@@ -2128,9 +2133,12 @@ GPUSHARE_EXPORT CUresult cuDriverGetVersion(int *version) {
 
 GPUSHARE_EXPORT CUresult cuDeviceGetCount(int *count) {
     TRACE("cuDeviceGetCount");
+    fprintf(stderr, "[gpushare] cuDeviceGetCount: ENTER\n");
+    fflush(stderr);
     int c = 0;
     cudaError_t err = cudaGetDeviceCount(&c);
     fprintf(stderr, "[gpushare] cuDeviceGetCount: returning %d\n", c);
+    fflush(stderr);
     if (count) *count = c;
     return (err == cudaSuccess || c > 0) ? CUDA_SUCCESS : CUDA_ERROR_NO_DEVICE;
 }
@@ -2671,6 +2679,8 @@ GPUSHARE_EXPORT nvmlReturn_t nvmlSystemGetNVMLVersion(char *version, unsigned in
 }
 
 GPUSHARE_EXPORT nvmlReturn_t nvmlDeviceGetCount_v2(unsigned int *deviceCount) {
+    fprintf(stderr, "[gpushare] nvmlDeviceGetCount_v2: ENTER\n");
+    fflush(stderr);
     TRACE("nvmlDeviceGetCount_v2");
     if (!ensure_connected()) {
         if (deviceCount) *deviceCount = g_local.available ? g_local.local_count : 0;
