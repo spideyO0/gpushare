@@ -1391,6 +1391,50 @@ GPUSHARE_EXPORT cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop,
     TRACE("cudaGetDeviceProperties(%d)", device);
     fflush(stderr);
 
+    /* If active device is remote, route ALL queries to remote to avoid driver API crashes */
+    if (g_local.available && !g_servers.empty() && is_remote_device(g_active_device)) {
+        fprintf(stderr, "[gpushare] cudaGetDeviceProperties: active is remote, routing to server\n");
+        fflush(stderr);
+        gs_device_props_req_t req;
+        req.device = to_remote_device(g_active_device);
+        std::vector<uint8_t> resp;
+        if (!rpc_call(GS_OP_GET_DEVICE_PROPS, &req, sizeof(req), resp)) return cudaErrorUnknown;
+        if (resp.size() < sizeof(gs_device_props_t)) return cudaErrorUnknown;
+        auto *r = (const gs_device_props_t*)resp.data();
+        if (prop) {
+            memset(prop, 0, sizeof(*prop));
+            strncpy(prop->name, r->name, sizeof(prop->name) - 1);
+            size_t len = strlen(prop->name);
+            if (len + 10 < sizeof(prop->name))
+                strcat(prop->name, " (remote)");
+            prop->totalGlobalMem     = r->total_global_mem;
+            prop->sharedMemPerBlock  = r->shared_mem_per_block;
+            prop->regsPerBlock       = r->regs_per_block;
+            prop->warpSize           = r->warp_size;
+            prop->maxThreadsPerBlock = r->max_threads_per_block;
+            prop->maxThreadsDim[0]   = r->max_threads_dim[0];
+            prop->maxThreadsDim[1]   = r->max_threads_dim[1];
+            prop->maxThreadsDim[2]   = r->max_threads_dim[2];
+            prop->maxGridSize[0]     = r->max_grid_size[0];
+            prop->maxGridSize[1]     = r->max_grid_size[1];
+            prop->maxGridSize[2]     = r->max_grid_size[2];
+            prop->clockRate          = r->clock_rate;
+            prop->major              = r->major;
+            prop->minor              = r->minor;
+            prop->multiProcessorCount= r->multi_processor_count;
+            prop->maxThreadsPerMultiProcessor = r->max_threads_per_mp;
+            prop->totalConstMem      = r->total_const_mem;
+            prop->memoryBusWidth     = (int)r->mem_bus_width;
+            prop->l2CacheSize        = (int)r->l2_cache_size;
+            prop->canMapHostMemory   = 1;
+            prop->concurrentKernels  = 1;
+            prop->unifiedAddressing   = 1;
+        }
+        fprintf(stderr, "[gpushare] cudaGetDeviceProperties: returning remote props\n");
+        fflush(stderr);
+        return cudaSuccess;
+    }
+
     /* Local GPU — query via real driver/runtime API */
     fprintf(stderr, "[gpushare] cudaGetDeviceProperties: local_avail=%d is_remote=%d device=%d\n",
             g_local.available ? 1 : 0, is_remote_device(device) ? 1 : 0, device);
