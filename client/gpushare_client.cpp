@@ -1339,13 +1339,17 @@ GPUSHARE_EXPORT cudaError_t cudaGetDeviceCount(int *count) {
     /* Count local GPUs (must be AFTER ensure_connected/load_config) */
     if (g_local.available && g_gpu_mode != "remote") {
         total += g_local.local_count;
+        fprintf(stderr, "[gpushare] cudaGetDeviceCount: local_count=%d, total=%d\n", g_local.local_count, total);
     }
 
     /* Count remote GPUs across all servers */
     if (g_gpu_mode != "local" && !g_servers.empty()) {
         total += g_total_remote_devices;
+        fprintf(stderr, "[gpushare] cudaGetDeviceCount: remote_count=%d, servers=%zu, total=%d\n", 
+                g_total_remote_devices, g_servers.size(), total);
     }
     if (count) *count = total;
+    fprintf(stderr, "[gpushare] cudaGetDeviceCount: returning %d\n", total);
     return total > 0 ? cudaSuccess : cudaErrorNoDevice;
 }
 
