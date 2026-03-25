@@ -1027,6 +1027,36 @@ else
     info "Skipping Python client (--skip-python)"
 fi
 
+# Install Python hook to all Python environments (pyenv, conda, venv, etc.)
+install_python_hooks() {
+    info "Installing Python hook to all Python environments..."
+    local installed=0
+
+    # Find all site-packages directories
+    local all_site_dirs
+    all_site_dirs=$(find /usr/lib /usr/local/lib "$HOME/.local/lib" "$HOME/.pyenv/versions" "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/.virtualenvs" -maxdepth 4 -type d -name "site-packages" 2>/dev/null || true)
+
+    for sp_dir in $all_site_dirs; do
+        if [[ -d "$sp_dir" ]]; then
+            cp "$PROJECT_DIR/python/gpushare_hook.py" "$sp_dir/gpushare_hook.py" 2>/dev/null || true
+            cp "$PROJECT_DIR/python/gpushare.pth" "$sp_dir/gpushare.pth" 2>/dev/null || true
+            if [[ -f "$sp_dir/gpushare_hook.py" ]]; then
+                ok "  Installed hook to $sp_dir"
+                installed=$((installed + 1))
+            fi
+        fi
+    done
+
+    if [[ $installed -gt 0 ]]; then
+        ok "Installed Python hook to $installed environment(s)"
+    else
+        warn "No Python environments found for hook installation"
+    fi
+}
+
+# Install hooks to all Python environments
+install_python_hooks
+
 # ── 10. Replace PyTorch's bundled CUDA libraries ───────────────────────────────
 # PyTorch bundles multiple CUDA libraries that need replacement:
 # - libcudart.so.12 (CUDA Runtime)
