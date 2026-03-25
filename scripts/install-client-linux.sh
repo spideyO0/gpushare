@@ -756,39 +756,82 @@ TEOF
 chmod 755 "$BIN_DIR/gpushare-monitor"
 ok "Installed $BIN_DIR/gpushare-monitor"
 
-# nvidia-smi shim — so GPU detection scripts and monitoring tools work
+# nvidia-smi wrapper for dual-GPU systems (has local GPU + remote GPU)
+# On systems with a local GPU, install a wrapper that uses the real nvidia-smi
+# On systems without a local GPU, install the shim that queries remote GPU
+
+# First, backup the real nvidia-smi if it exists
+NVIDIA_SMI_REAL="/usr/bin/nvidia-smi.real"
+if [[ -f /usr/bin/nvidia-smi ]] && [[ ! -L /usr/bin/nvidia-smi ]]; then
+    cp /usr/bin/nvidia-smi "$NVIDIA_SMI_REAL"
+    info "Backed up real nvidia-smi to $NVIDIA_SMI_REAL"
+fi
+
+# Copy our tools to share directory
 cp "$PROJECT_DIR/scripts/nvidia-smi" "$SHARE_DIR/nvidia-smi"
+cp "$PROJECT_DIR/scripts/nvidia-smi-wrapper.sh" "$SHARE_DIR/nvidia-smi-wrapper.sh"
 chmod 755 "$SHARE_DIR/nvidia-smi"
-if ! command -v nvidia-smi >/dev/null 2>&1; then
-    cat > "$BIN_DIR/nvidia-smi" <<'NSMI'
-#!/usr/bin/env bash
-exec python3 /usr/local/share/gpushare/nvidia-smi "$@"
-NSMI
+chmod 755 "$SHARE_DIR/nvidia-smi-wrapper.sh"
+
+# Install the appropriate nvidia-smi command
+if [[ -f "$NVIDIA_SMI_REAL" ]] && [[ "$HAS_LOCAL_CUDA" == true ]]; then
+    # Dual-GPU system: install wrapper that uses real nvidia-smi with correct library path
+    cat > "$BIN_DIR/nvidia-smi" <<'WRAPPER#!/usr/bin/env bash
+# nvidia-smi wrapper for gpushare clients
+#
+# This script ensures nvidia-smi works correctly on systems with both
+# local and remote GPUs by using the real NVIDIA tools with the proper
+# library path.
+
+if [ -d /usr/local/lib/gpushare/real ]; then
+    export LD_LIBRARY_PATH="/usr/local/lib/gpushare/real:$LD_LIBRARY_PATH"
+fi
+
+# Find real nvidia-smi
+if [ -f /usr/bin/nvidia-smi.real ]; then
+    exec /usr/bin/nvidia-smi.real "$@"
+elif [ -f /opt/cuda/bin/nvidia-smi ]; then
+    exec /opt/cuda/bin/nvidia-smi "$@"
+else
+    # Fallback to remote GPU query
+    exec python3 /usr/local/share/gpushare/nvidia-smi-wrapper.sh "$@"
+fi
+WRAPPER
     chmod 755 "$BIN_DIR/nvidia-smi"
-    # Fix SELinux context if enforcing (Fedora, RHEL, CentOS)
-    if command -v restorecon >/dev/null 2>&1; then
-        restorecon -v "$BIN_DIR/nvidia-smi" 2>/dev/null || true
-        restorecon -Rv "$SHARE_DIR" 2>/dev/null || true
-        restorecon -Rv "$LIB_DIR" 2>/dev/null || true
+    ok "Installed nvidia-smi command (wrapper -> real nvidia-smi for local GPUs)"
+else
+    # No local GPU: install shim that queries remote GPU
+    if ! command -v nvidia-smi >/dev/null 2>&1 || [[ -f "$NVIDIA_SMI_REAL" ]]; then
+        cat > "$BIN_DIR/nvidia-smi" <<'SHIM#!/usr/bin/env bash
+# nvidia-smi shim for remote GPU queries
+exec python3 /usr/local/share/gpushare/nvidia-smi "$@"
+SHIM
+        chmod 755 "$BIN_DIR/nvidia-smi"
     fi
-    # Fix AppArmor if present (Ubuntu, SUSE)
-    if command -v aa-complain >/dev/null 2>&1 && [[ -d /etc/apparmor.d ]]; then
-        # Ensure our paths aren't blocked
-        if [[ ! -f /etc/apparmor.d/local/gpushare ]]; then
-            mkdir -p /etc/apparmor.d/local
-            cat > /etc/apparmor.d/local/gpushare <<'AAEOF'
-# gpushare — allow execution of nvidia-smi shim and client library
+    ok "Installed nvidia-smi command (queries remote GPU)"
+fi
+
+# Fix SELinux context if enforcing (Fedora, RHEL, CentOS)
+if command -v restorecon >/dev/null 2>&1; then
+    restorecon -v "$BIN_DIR/nvidia-smi" 2>/dev/null || true
+    restorecon -Rv "$SHARE_DIR" 2>/dev/null || true
+    restorecon -Rv "$LIB_DIR" 2>/dev/null || true
+fi
+
+# Fix AppArmor if present (Ubuntu, SUSE)
+if command -v aa-complain >/dev/null 2>&1 && [[ -d /etc/apparmor.d ]]; then
+    # Ensure our paths aren't blocked
+    if [[ ! -f /etc/apparmor.d/local/gpushare ]]; then
+        mkdir -p /etc/apparmor.d/local
+        cat > /etc/apparmor.d/local/gpushare <<'AAEOF'
+# gpushare — allow execution of nvidia-smi and client library
 /usr/local/bin/nvidia-smi rix,
 /usr/local/bin/gpushare-* rix,
 /usr/local/share/gpushare/** rix,
 /usr/local/lib/gpushare/** rm,
 AAEOF
-            ok "Created AppArmor local profile for gpushare"
-        fi
+        ok "Created AppArmor local profile for gpushare"
     fi
-    ok "Installed nvidia-smi command (queries remote GPU)"
-else
-    warn "Real nvidia-smi found — not overriding (shim at $SHARE_DIR/nvidia-smi)"
 fi
 
 # ── 8. Install Python client + startup hook ───────────────────────────────────
