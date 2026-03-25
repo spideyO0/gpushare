@@ -1344,14 +1344,22 @@ GPUSHARE_EXPORT cudaError_t cudaGetDeviceCount(int *count) {
 
 GPUSHARE_EXPORT cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop, int device) {
     TRACE("cudaGetDeviceProperties(%d)", device);
+    fflush(stderr);
 
     /* Local GPU — query via real driver/runtime API */
+    fprintf(stderr, "[gpushare] cudaGetDeviceProperties: local_avail=%d is_remote=%d device=%d\n",
+            g_local.available ? 1 : 0, is_remote_device(device) ? 1 : 0, device);
+    fflush(stderr);
     if (g_local.available && !is_remote_device(device)) {
+        fprintf(stderr, "[gpushare] cudaGetDeviceProperties: querying LOCAL device\n");
+        fflush(stderr);
 #ifdef _WIN32
         if (g_local.GetDeviceProperties) {
             cudaError_t err = g_local.GetDeviceProperties(prop, to_local_device(device));
 #else
         {
+            fprintf(stderr, "[gpushare] cudaGetDeviceProperties: calling local_get_device_props\n");
+            fflush(stderr);
             cudaError_t err = local_get_device_props(prop, to_local_device(device));
 #endif
             if (err == cudaSuccess && prop) {
