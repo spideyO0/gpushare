@@ -1420,7 +1420,9 @@ GPUSHARE_EXPORT cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop,
                 if (len + 8 < sizeof(prop->name))
                     strcat(prop->name, " (local)");
             }
-            fprintf(stderr, "[gpushare] cudaGetDeviceProperties: returning\n");
+            fprintf(stderr, "[gpushare] cudaGetDeviceProperties: returning err=%d\n", err);
+            fflush(stderr);
+            fprintf(stderr, "[gpushare] cudaGetDeviceProperties: EXITING\n");
             fflush(stderr);
             return err;
         }
