@@ -1072,41 +1072,31 @@ install_python_hooks
 if [[ "$NO_SYMLINKS" == false ]]; then
     info "Checking for PyTorch bundled CUDA libraries to replace..."
 
-    TORCH_LIBS_REPLACED=0
+    info "Skipping PyTorch CUDA library replacement (use LD_PRELOAD instead)"
+    info "Restoring original PyTorch libraries if previously replaced..."
 
-    # Find all site-packages directories with potential PyTorch CUDA libs
+    # Restore original PyTorch CUDA libraries from backups
+    RESTORED=0
     SITE_PACKAGES_DIRS=$(find /usr/lib /usr/local/lib "$REAL_HOME/.local/lib" "$REAL_HOME/.pyenv/versions" "$REAL_HOME/miniconda3" "$REAL_HOME/anaconda3" "$REAL_HOME/.virtualenvs" -maxdepth 4 -type d -name "site-packages" 2>/dev/null || true)
 
-    # Find and replace ALL CUDA libraries in PyTorch's nvidia/ directories
     for sp_dir in $SITE_PACKAGES_DIRS; do
         [[ -d "$sp_dir" ]] || continue
 
-        # Find all nvidia CUDA library directories
-        for nvidia_dir in "$sp_dir/nvidia"/cuda*/lib "$sp_dir/nvidia"/cu*/lib "$sp_dir/nvidia"/cudnn/lib "$sp_dir/torch/lib"/cuda*/lib; do
-            [[ -d "$nvidia_dir" ]] || continue
-
-            # Replace each .so file (but not .a static libs)
-            for lib_file in "$nvidia_dir"/*.so*; do
-                [[ -f "$lib_file" ]] || continue
-
-                # Back up original if not already backed up
-                if [[ ! -f "${lib_file}.real" ]]; then
-                    cp "$lib_file" "${lib_file}.real" 2>/dev/null || true
-                fi
-
-                # Always replace with gpushare library (overwrites previous replacement too)
-                cp "$LIB_DIR/libgpushare_client.so.1.0.0" "$lib_file" 2>/dev/null || true
-                chmod 644 "$lib_file" 2>/dev/null || true
-                TORCH_LIBS_REPLACED=$((TORCH_LIBS_REPLACED + 1))
-            done
-        done
+        # Find all .real backup files and restore them
+        while IFS= read -r -d '' backup_file; do
+            original="${backup_file%.real}"
+            if [[ -f "$backup_file" ]]; then
+                cp "$backup_file" "$original" 2>/dev/null || true
+                rm -f "$backup_file" 2>/dev/null || true
+                RESTORED=$((RESTORED + 1))
+            fi
+        done < <(find "$sp_dir" -name "*.real" -print0 2>/dev/null)
     done
 
-    if [[ $TORCH_LIBS_REPLACED -gt 0 ]]; then
-        ok "Replaced $TORCH_LIBS_REPLACED PyTorch CUDA library files with gpushare"
-    else
-        info "No PyTorch CUDA libraries found to replace"
+    if [[ $RESTORED -gt 0 ]]; then
+        ok "Restored $RESTORED original PyTorch CUDA libraries"
     fi
+    info "Make sure LD_PRELOAD is set: source ~/.bashrc"
 fi
 
 # ── 11. Systemd user service for dashboard ────────────────────────────────────
