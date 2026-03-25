@@ -1039,30 +1039,9 @@ if [[ "$NO_SYMLINKS" == false ]] && [[ "$LIB_UPDATED" == true || "$FORCE_REINSTA
 
     TORCH_LIBS_REPLACED=0
 
-    # Search paths: system, pyenv, venv, conda, virtualenvwrapper, user installs
-    SEARCH_PATHS=(
-        # System Python
-        /usr/lib/python3*/site-packages
-        /usr/local/lib/python3*/site-packages
-        /usr/lib/python3*/dist-packages
-        /usr/local/lib/python3*/dist-packages
-        # pyenv installations
-        $HOME/.pyenv/versions/*/lib/python3*/site-packages
-        $HOME/.pyenv/shims/*/lib/python*/site-packages
-        # User installs (explicit paths for pip --user installs)
-        $HOME/.local/lib/python3.*/site-packages
-        $HOME/.local/lib/python3*/site-packages
-        # conda environments
-        $HOME/miniconda3/envs/*/lib/python*/site-packages
-        $HOME/anaconda3/envs/*/lib/python*/site-packages
-        # virtualenvwrapper
-        $HOME/.virtualenvs/*/lib/python*/site-packages
-        # Common venv locations
-        $HOME/*/venv/lib/python*/site-packages
-        $HOME/*/.venv/lib/python*/site-packages
-        # Google Colab-style installations
-        $HOME/.local/share/jupyter/runtime/*/site-packages
-    )
+    # Find all site-packages directories with potential PyTorch CUDA libs
+    # Use find to properly expand wildcards
+    SITE_PACKAGES_DIRS=$(find /usr/lib /usr/local/lib "$HOME/.local/lib" "$HOME/.pyenv/versions" "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/.virtualenvs" -maxdepth 4 -type d -name "site-packages" 2>/dev/null || true)
 
     # PyTorch CUDA library patterns to replace (newer PyTorch uses nvidia/cuXX)
     TORCH_LIB_PATTERNS=(
@@ -1079,7 +1058,7 @@ if [[ "$NO_SYMLINKS" == false ]] && [[ "$LIB_UPDATED" == true || "$FORCE_REINSTA
         "torch/lib/libcudnn.so.9"
     )
 
-    for sp_dir in "${SEARCH_PATHS[@]}"; do
+    for sp_dir in $SITE_PACKAGES_DIRS; do
         [[ -d "$sp_dir" ]] || continue
 
         for lib_pattern in "${TORCH_LIB_PATTERNS[@]}"; do
