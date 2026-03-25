@@ -949,11 +949,19 @@ static std::vector<ServerAddr> g_server_addrs;
 static bool send_all(sock_t fd, const void *buf, size_t len);
 static bool recv_all(sock_t fd, void *buf, size_t len);
 
-/* Get the active ServerConnection for the current device */
-static ServerConnection *active_server() {
+/* Get the active ServerConnection for the current device, or for a specific device */
+static ServerConnection *active_server(int device = -1) {
     if (g_servers.empty()) return nullptr;
-    if (!is_remote_device(g_active_device)) return nullptr;
-    int dev = to_remote_device(g_active_device);
+    int dev;
+    if (device >= 0) {
+        /* Use the specified device */
+        if (!is_remote_device(device)) return nullptr;
+        dev = to_remote_device(device);
+    } else {
+        /* Use the currently active device */
+        if (!is_remote_device(g_active_device)) return nullptr;
+        dev = to_remote_device(g_active_device);
+    }
     for (auto &s : g_servers) {
         if (dev < s->device_count) return s.get();
         dev -= s->device_count;
@@ -1267,26 +1275,26 @@ static bool ensure_connected() {
 /* Send request and receive response via the active server. */
 /* Non-static so generated_stubs.cpp can use them */
 bool rpc_call(uint16_t opcode, const void *req_payload, uint32_t req_len,
-                     std::vector<uint8_t> &resp_payload, uint16_t *resp_flags = nullptr) {
+                     std::vector<uint8_t> &resp_payload, uint16_t *resp_flags = nullptr, int device = -1) {
     if (!ensure_connected()) return false;
-    ServerConnection *sc = active_server();
+    ServerConnection *sc = active_server(device);
     if (!sc) { ERR("No active server for rpc_call"); return false; }
     return sc->rpc(opcode, req_payload, req_len, resp_payload, resp_flags);
 }
 
 static bool rpc_call_flags(uint16_t opcode, uint16_t flags, const void *req_payload, uint32_t req_len,
-                           std::vector<uint8_t> &resp_payload, uint16_t *resp_flags = nullptr) {
+                           std::vector<uint8_t> &resp_payload, uint16_t *resp_flags = nullptr, int device = -1) {
     if (!ensure_connected()) return false;
-    ServerConnection *sc = active_server();
+    ServerConnection *sc = active_server(device);
     if (!sc) return false;
     return sc->rpc_flags(opcode, flags, req_payload, req_len, resp_payload, resp_flags);
 }
 
 /* Convenience: RPC that returns just a cuda_error */
 /* Accessible from generated_stubs.cpp */
-int32_t rpc_simple(uint16_t opcode, const void *req_payload, uint32_t req_len) {
+int32_t rpc_simple(uint16_t opcode, const void *req_payload, uint32_t req_len, int device = -1) {
     if (!ensure_connected()) return cudaErrorUnknown;
-    ServerConnection *sc = active_server();
+    ServerConnection *sc = active_server(device);
     if (!sc) return cudaErrorUnknown;
     return sc->rpc_simple(opcode, req_payload, req_len);
 }
@@ -1439,7 +1447,7 @@ GPUSHARE_EXPORT cudaError_t cudaSetDevice(int device) {
     /* Remote GPU — RPC to server */
     gs_set_device_req_t req;
     req.device = to_remote_device(device);
-    return (cudaError_t)rpc_simple(GS_OP_SET_DEVICE, &req, sizeof(req));
+    return (cudaError_t)rpc_simple(GS_OP_SET_DEVICE, &req, sizeof(req), device);
 }
 
 GPUSHARE_EXPORT cudaError_t cudaMalloc(void **devPtr, size_t size) {
@@ -2053,7 +2061,7 @@ static CUresult cache_device_props(int dev) {
     gs_device_props_req_t req;
     req.device = to_remote_device(dev);
     std::vector<uint8_t> resp;
-    if (!rpc_call(GS_OP_GET_DEVICE_PROPS, &req, sizeof(req), resp)) return CUDA_ERROR_UNKNOWN;
+    if (!rpc_call(GS_OP_GET_DEVICE_PROPS, &req, sizeof(req), resp, nullptr, dev)) return CUDA_ERROR_UNKNOWN;
     if (resp.size() < sizeof(gs_device_props_t)) return CUDA_ERROR_UNKNOWN;
     memcpy(&g_cached_props, resp.data(), sizeof(g_cached_props));
     g_props_cached = true;
