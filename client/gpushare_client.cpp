@@ -323,6 +323,9 @@ static cudaError_t local_get_device_props(struct cudaDeviceProp *prop, int local
         return val;
     };
 
+    fprintf(stderr, "[gpushare] local_get_device_props: querying attributes...\n");
+    fflush(stderr);
+
     prop->sharedMemPerBlock     = ga(CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK);
     prop->regsPerBlock          = ga(CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_BLOCK);
     prop->warpSize              = ga(CU_DEVICE_ATTRIBUTE_WARP_SIZE);
