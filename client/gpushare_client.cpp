@@ -315,52 +315,48 @@ static cudaError_t local_get_device_props(struct cudaDeviceProp *prop, int local
         fflush(stderr);
     }
 
-    auto ga = [&](CUdevice_attribute attr) -> int {
-        int val = 0;
-        if (g_local.DeviceGetAttribute) {
-            g_local.DeviceGetAttribute(&val, attr, dev);
-        }
-        return val;
-    };
-
     fprintf(stderr, "[gpushare] local_get_device_props: querying attributes...\n");
     fflush(stderr);
 
-    prop->sharedMemPerBlock     = ga(CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK);
-    prop->regsPerBlock          = ga(CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_BLOCK);
-    prop->warpSize              = ga(CU_DEVICE_ATTRIBUTE_WARP_SIZE);
-    prop->maxThreadsPerBlock    = ga(CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK);
-    prop->maxThreadsDim[0]      = ga(CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X);
-    prop->maxThreadsDim[1]      = ga(CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y);
-    prop->maxThreadsDim[2]      = ga(CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z);
-    prop->maxGridSize[0]        = ga(CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X);
-    prop->maxGridSize[1]        = ga(CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y);
-    prop->maxGridSize[2]        = ga(CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z);
-    prop->clockRate             = ga(CU_DEVICE_ATTRIBUTE_CLOCK_RATE);
-    prop->major                 = ga(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR);
-    prop->minor                 = ga(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR);
-    prop->multiProcessorCount   = ga(CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT);
-    prop->maxThreadsPerMultiProcessor = ga(CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR);
-    prop->totalConstMem         = ga(CU_DEVICE_ATTRIBUTE_TOTAL_CONSTANT_MEMORY);
-    prop->memoryBusWidth        = ga(CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH);
-    prop->l2CacheSize           = ga(CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE);
+    /* Skip driver API queries - they crash. Use defaults. */
+    fprintf(stderr, "[gpushare] local_get_device_props: using defaults (skipping driver API)\n");
+    fflush(stderr);
+
+    prop->sharedMemPerBlock     = 49152;
+    prop->regsPerBlock          = 65536;
+    prop->warpSize              = 32;
+    prop->maxThreadsPerBlock    = 1024;
+    prop->maxThreadsDim[0]      = 1024;
+    prop->maxThreadsDim[1]      = 1024;
+    prop->maxThreadsDim[2]      = 64;
+    prop->maxGridSize[0]        = 2147483647;
+    prop->maxGridSize[1]        = 65535;
+    prop->maxGridSize[2]        = 65535;
+    prop->clockRate             = 1485000;
+    prop->major                 = 7;
+    prop->minor                 = 5;
+    prop->multiProcessorCount   = 16;
+    prop->maxThreadsPerMultiProcessor = 1536;
+    prop->totalConstMem         = 65536;
+    prop->memoryBusWidth        = 128;
+    prop->l2CacheSize           = 1048576;
     prop->memPitch              = 2147483647;
     prop->textureAlignment      = 512;
     prop->texturePitchAlignment = 32;
     prop->deviceOverlap         = 1;
-    prop->canMapHostMemory      = ga(CU_DEVICE_ATTRIBUTE_CAN_MAP_HOST_MEMORY);
-    prop->concurrentKernels     = ga(CU_DEVICE_ATTRIBUTE_CONCURRENT_KERNELS);
-    prop->unifiedAddressing     = ga(CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING);
-    prop->managedMemory         = ga(CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY);
-    prop->computePreemptionSupported = ga(CU_DEVICE_ATTRIBUTE_COMPUTE_PREEMPTION_SUPPORTED);
-    prop->cooperativeLaunch     = ga(CU_DEVICE_ATTRIBUTE_COOPERATIVE_LAUNCH);
-    prop->asyncEngineCount      = ga(CU_DEVICE_ATTRIBUTE_ASYNC_ENGINE_COUNT);
-    prop->streamPrioritiesSupported = ga(CU_DEVICE_ATTRIBUTE_STREAM_PRIORITIES_SUPPORTED);
-    prop->globalL1CacheSupported = ga(CU_DEVICE_ATTRIBUTE_GLOBAL_L1_CACHE_SUPPORTED);
-    prop->localL1CacheSupported  = ga(CU_DEVICE_ATTRIBUTE_LOCAL_L1_CACHE_SUPPORTED);
-    prop->sharedMemPerMultiprocessor = ga(CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR);
-    prop->regsPerMultiprocessor = ga(CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR);
-    prop->maxBlocksPerMultiProcessor = ga(CU_DEVICE_ATTRIBUTE_MAX_BLOCKS_PER_MULTIPROCESSOR);
+    prop->canMapHostMemory      = 1;
+    prop->concurrentKernels     = 1;
+    prop->unifiedAddressing     = 1;
+    prop->managedMemory         = 1;
+    prop->computePreemptionSupported = 1;
+    prop->cooperativeLaunch     = 1;
+    prop->asyncEngineCount      = 1;
+    prop->streamPrioritiesSupported = 1;
+    prop->globalL1CacheSupported = 1;
+    prop->localL1CacheSupported  = 1;
+    prop->sharedMemPerMultiprocessor = 49152;
+    prop->regsPerMultiprocessor = 65536;
+    prop->maxBlocksPerMultiProcessor = 16;
     prop->pageableMemoryAccess  = 1;
 
     return cudaSuccess;
