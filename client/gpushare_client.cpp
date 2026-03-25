@@ -359,6 +359,8 @@ static cudaError_t local_get_device_props(struct cudaDeviceProp *prop, int local
     prop->maxBlocksPerMultiProcessor = 16;
     prop->pageableMemoryAccess  = 1;
 
+    fprintf(stderr, "[gpushare] local_get_device_props: returning cudaSuccess\n");
+    fflush(stderr);
     return cudaSuccess;
 }
 #endif /* !_WIN32 */
