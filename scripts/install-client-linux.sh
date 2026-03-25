@@ -900,51 +900,9 @@ detect_python_environments() {
 }
 
 manage_ld_preload() {
-    local preload_lib="$LIB_DIR/libgpushare_client.so"
-    local preload_path="$preload_lib"
-    local added=0
-    local skipped=0
-
-    info "Configuring LD_PRELOAD in shell profiles and system-wide..."
-
-    # Add to user's shell profiles
-    for f in "$REAL_HOME/.bashrc" "$REAL_HOME/.bash_profile" "$REAL_HOME/.profile" "$REAL_HOME/.zshrc" "$REAL_HOME/.zprofile"; do
-        if [[ -f "$f" ]]; then
-            if grep -q 'LD_PRELOAD.*'"$preload_path" "$f" 2>/dev/null; then
-                skipped=$((skipped + 1))
-            else
-                echo "" >> "$f"
-                echo "# gpushare - set LD_PRELOAD to use remote GPU" >> "$f"
-                echo "export LD_PRELOAD=\"$preload_path\"" >> "$f"
-                added=$((added + 1))
-            fi
-        fi
-    done
-
-    # Add system-wide to /etc/profile.d/ (applies to all users immediately)
-    if [[ -d /etc/profile.d ]]; then
-        local profile_script="/etc/profile.d/gpushare.sh"
-        if [[ ! -f "$profile_script" ]] || ! grep -q "$preload_path" "$profile_script" 2>/dev/null; then
-            echo "#!/bin/bash" > "$profile_script"
-            echo "export LD_PRELOAD=\"$preload_path\"" >> "$profile_script"
-            chmod 644 "$profile_script"
-            added=$((added + 1))
-        else
-            skipped=$((skipped + 1))
-        fi
-    fi
-
-    # Also add to /etc/environment for system-wide (login managers, systemd)
-    if [[ -f /etc/environment ]]; then
-        if grep -q "$preload_path" /etc/environment 2>/dev/null; then
-            skipped=$((skipped + 1))
-        else
-            echo "LD_PRELOAD=\"$preload_path\"" >> /etc/environment
-            added=$((added + 1))
-        fi
-    fi
-
-    ok "LD_PRELOAD configured: $added added, $skipped already configured"
+    info "Skipping LD_PRELOAD (breaks PyTorch - use symlinks + gpushare_hook.py instead)"
+    info "The symlinks in /usr/lib provide transparent CUDA interception"
+    info "The gpushare_hook.py patches PyTorch for remote GPU detection"
 }
 
 manage_python_path() {
