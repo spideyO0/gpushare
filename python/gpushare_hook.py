@@ -508,61 +508,6 @@ def _do_patch():
 
 def install():
     """Called from gpushare.pth at Python startup."""
-    # Skip in test environments or when explicitly disabled
-    if os.environ.get("GPUSHARE_NO_HOOK"):
-        return
-
-    # Phase 1: Discover GPUs via ctypes (fast, no network)
-    # SKIP on Windows: ctypes.CDLL loads our DLL from a different path than
-    # torch\lib\nvcuda.dll, creating TWO DLL instances with separate static
-    # state. The second instance's RPC hangs. Use TCP fallback instead.
-    if sys.platform != "win32":
-        try:
-            _query_devices_ctypes()
-        except Exception:
-            pass
-
-    # Phase 2: If no remote GPUs found via ctypes, try direct TCP to server.
-    # This is essential for:
-    #   - Windows (always — to avoid dual DLL instance issue)
-    #   - Server machine (libcuda.so.1 is the real driver)
-    #   - Any system where our C library isn't installed as the CUDA driver
-    # Skip TCP if ctypes already found devices (includes remote from our C++ lib)
-    if _device_count == 0:
-        try:
-            _query_remote_gpus_tcp()
-        except Exception:
-            pass
-
-    if _device_count == 0:
-        return
-
-    # Strategy: we CANNOT patch torch.cuda during import because Python adds
-    # submodules to sys.modules BEFORE they finish executing __init__.py.
-    # Checking individual attrs is a race (is_available exists, device_count doesn't).
-    #
-    # Fix: track import nesting depth. Only patch when depth returns to 0,
-    # which means ALL imports (including torch's internal sub-imports) have
-    # finished. This guarantees torch.cuda is fully initialized.
-
-    _real_import = builtins.__import__
-    _depth = [0]
-
-    def _import_hook(name, *args, **kwargs):
-        _depth[0] += 1
-        try:
-            module = _real_import(name, *args, **kwargs)
-        finally:
-            _depth[0] -= 1
-
-        # Only patch when we're back at the top level (all imports done)
-        if _depth[0] == 0 and not _patched:
-            if "torch.cuda" in sys.modules:
-                try:
-                    _do_patch()
-                except Exception as e:
-                    sys.stderr.write(f"[gpushare] Hook error: {e}\n")
-
-        return module
-
-    builtins.__import__ = _import_hook
+    # Skip everything - let C++ library handle all GPU detection
+    sys.stderr.write("[gpushare] Hook: skipping all GPU detection, C++ handles it\n")
+    return
