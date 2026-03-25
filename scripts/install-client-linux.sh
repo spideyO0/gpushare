@@ -776,7 +776,8 @@ chmod 755 "$SHARE_DIR/nvidia-smi-wrapper.sh"
 # Install the appropriate nvidia-smi command
 if [[ -f "$NVIDIA_SMI_REAL" ]] && [[ "$HAS_LOCAL_CUDA" == true ]]; then
     # Dual-GPU system: install wrapper that uses real nvidia-smi with correct library path
-    cat > "$BIN_DIR/nvidia-smi" <<'WRAPPER#!/usr/bin/env bash
+    cat > "$BIN_DIR/nvidia-smi" <<'WRAPPER'
+#!/usr/bin/env bash
 # nvidia-smi wrapper for gpushare clients
 #
 # This script ensures nvidia-smi works correctly on systems with both
@@ -791,7 +792,7 @@ fi
 if [ -f /usr/bin/nvidia-smi.real ]; then
     exec /usr/bin/nvidia-smi.real "$@"
 elif [ -f /opt/cuda/bin/nvidia-smi ]; then
-    exec /opt/cuda/bin/nvidia-smi "$@"
+    exec /opt/cuda/bin/nvidia-smi "@@"
 else
     # Fallback to remote GPU query
     exec python3 /usr/local/share/gpushare/nvidia-smi-wrapper.sh "$@"
@@ -802,7 +803,8 @@ WRAPPER
 else
     # No local GPU: install shim that queries remote GPU
     if ! command -v nvidia-smi >/dev/null 2>&1 || [[ -f "$NVIDIA_SMI_REAL" ]]; then
-        cat > "$BIN_DIR/nvidia-smi" <<'SHIM#!/usr/bin/env bash
+        cat > "$BIN_DIR/nvidia-smi" <<'SHIM'
+#!/usr/bin/env bash
 # nvidia-smi shim for remote GPU queries
 exec python3 /usr/local/share/gpushare/nvidia-smi "$@"
 SHIM
