@@ -1389,12 +1389,20 @@ GPUSHARE_EXPORT cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop,
             fprintf(stderr, "[gpushare] cudaGetDeviceProperties: calling local_get_device_props\n");
             fflush(stderr);
             cudaError_t err = local_get_device_props(prop, to_local_device(device));
+            fprintf(stderr, "[gpushare] cudaGetDeviceProperties: local_get_device_props returned %d\n", err);
+            fflush(stderr);
 #endif
             if (err == cudaSuccess && prop) {
+                fprintf(stderr, "[gpushare] cudaGetDeviceProperties: appending (local) to name\n");
+                fflush(stderr);
                 size_t len = strlen(prop->name);
+                fprintf(stderr, "[gpushare] cudaGetDeviceProperties: name len=%zu\n", len);
+                fflush(stderr);
                 if (len + 8 < sizeof(prop->name))
                     strcat(prop->name, " (local)");
             }
+            fprintf(stderr, "[gpushare] cudaGetDeviceProperties: returning\n");
+            fflush(stderr);
             return err;
         }
     }
