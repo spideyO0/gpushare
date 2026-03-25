@@ -1392,7 +1392,8 @@ GPUSHARE_EXPORT cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop,
     fflush(stderr);
 
     /* If active device is remote, route ALL queries to remote to avoid driver API crashes */
-    if (g_local.available && !g_servers.empty() && is_remote_device(g_active_device)) {
+    bool should_route_remote = (!g_local.available || is_remote_device(g_active_device)) && !g_servers.empty();
+    if (should_route_remote) {
         fprintf(stderr, "[gpushare] cudaGetDeviceProperties: active is remote, routing to server\n");
         fflush(stderr);
         gs_device_props_req_t req;
