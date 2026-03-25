@@ -1075,49 +1075,39 @@ if [[ "$NO_SYMLINKS" == false ]]; then
     TORCH_LIBS_REPLACED=0
 
     # Find all site-packages directories with potential PyTorch CUDA libs
-    # Use find to properly expand wildcards
-    info "REAL_HOME=$REAL_HOME, searching in: $REAL_HOME/.local/lib"
     SITE_PACKAGES_DIRS=$(find /usr/lib /usr/local/lib "$REAL_HOME/.local/lib" "$REAL_HOME/.pyenv/versions" "$REAL_HOME/miniconda3" "$REAL_HOME/anaconda3" "$REAL_HOME/.virtualenvs" -maxdepth 4 -type d -name "site-packages" 2>/dev/null || true)
-    info "Found site-packages: $SITE_PACKAGES_DIRS"
 
-    # PyTorch CUDA library patterns to replace (newer PyTorch uses nvidia/cuXX)
-    TORCH_LIB_PATTERNS=(
-        "nvidia/cuda_runtime/lib/libcudart.so.12"
-        "nvidia/cuda_runtime/lib/libcudart.so.13"
-        "nvidia/cuda_runtime/lib/libcuda.so.1"
-        "nvidia/cu12/lib/libcudart.so.12"
-        "nvidia/cu13/lib/libcudart.so.13"
-        "nvidia/cudnn/lib/libcudnn.so.8"
-        "nvidia/cudnn/lib/libcudnn.so.9"
-        "torch/lib/cudart/cuda-runtime/lib/libcudart.so.12"
-        "torch/lib/libcuda.so.1"
-        "torch/lib/libcudnn.so.8"
-        "torch/lib/libcudnn.so.9"
-    )
-
+    # Find and replace ALL CUDA libraries in PyTorch's nvidia/ directories
     for sp_dir in $SITE_PACKAGES_DIRS; do
         [[ -d "$sp_dir" ]] || continue
 
-        for lib_pattern in "${TORCH_LIB_PATTERNS[@]}"; do
-            torch_lib="$sp_dir/$lib_pattern"
-            [[ -f "$torch_lib" ]] || continue
+        # Find all nvidia CUDA library directories
+        for nvidia_dir in "$sp_dir/nvidia"/cuda*/lib "$sp_dir/nvidia"/cu*/lib "$sp_dir/nvidia"/cudnn/lib "$sp_dir/torch/lib"/cuda*/lib; do
+            [[ -d "$nvidia_dir" ]] || continue
 
-            # Check if already replaced (has __cudaRegisterFatBinary or __cudaPushCallConfiguration)
-            if nm -D "$torch_lib" 2>/dev/null | grep -q '__cudaRegisterFatBinary\|__cudaPushCallConfiguration'; then
-                info "  Already replaced: $torch_lib"
-                continue
-            fi
+            # Replace each .so file (but not .a static libs)
+            for lib_file in "$nvidia_dir"/*.so*; do
+                [[ -f "$lib_file" ]] || continue
 
-            # Back up the original
-            [[ -f "${torch_lib}.real" ]] || cp "$torch_lib" "${torch_lib}.real"
+                # Skip if already replaced
+                if nm -D "$lib_file" 2>/dev/null | grep -q '__cudaRegisterFatBinary\|__cudaPushCallConfiguration'; then
+                    continue
+                fi
 
-            # Replace with gpushare library
-            cp "$LIB_DIR/libgpushare_client.so.1.0.0" "$torch_lib"
-            chmod 644 "$torch_lib"
-            TORCH_LIBS_REPLACED=$((TORCH_LIBS_REPLACED + 1))
-            ok "  Replaced: $torch_lib"
+                # Back up original
+                [[ -f "${lib_file}.real" ]] || cp "$lib_file" "${lib_file}.real" 2>/dev/null || true
+
+                # Replace with gpushare library
+                cp "$LIB_DIR/libgpushare_client.so.1.0.0" "$lib_file" 2>/dev/null || true
+                chmod 644 "$lib_file" 2>/dev/null || true
+                TORCH_LIBS_REPLACED=$((TORCH_LIBS_REPLACED + 1))
+            done
         done
     done
+
+    if [[ $TORCH_LIBS_REPLACED -gt 0 ]]; then
+        info "Replaced $TORCH_LIBS_REPLACED PyTorch CUDA library files"
+    fi
 
     if [[ $TORCH_LIBS_REPLACED -gt 0 ]]; then
         ok "Replaced $TORCH_LIBS_REPLACED PyTorch bundled CUDA libraries with gpushare"
