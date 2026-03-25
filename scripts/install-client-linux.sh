@@ -550,6 +550,18 @@ if [[ "${HAS_LOCAL_CUDA:-false}" == true ]] && [[ "$NO_SYMLINKS" == false ]]; th
                 fi
             fi
         done
+        # Also check if the symlink target exists in the backup
+        local sys_lib="/usr/lib"
+        if [[ -L "$sys_lib/$libname" ]]; then
+            local link_target
+            link_target=$(readlink -f "$sys_lib/$libname" 2>/dev/null || true)
+            if [[ -f "$link_target" ]] && [[ "$link_target" != *gpushare* ]]; then
+                if [[ ! -f "$REAL_CUDA_BACKUP/$libname" ]]; then
+                    cp "$link_target" "$REAL_CUDA_BACKUP/$libname"
+                    ok "Backed up $libname from symlink $link_target"
+                fi
+            fi
+        fi
     }
 
     backup_lib "libcudart.so"
@@ -642,8 +654,19 @@ if [[ "$NO_SYMLINKS" == false ]]; then
     target="$LIB_DIR/libgpushare_client.so"
     created=0
     skipped=0
+    failed=0
     for link in "${CUDA_SYMLINKS[@]}"; do
         sys_path="$SYS_LIB_DIR/$link"
+
+        # Check if already points to gpushare — skip if so
+        if [[ -L "$sys_path" ]]; then
+            existing_target=$(readlink -f "$sys_path" 2>/dev/null || true)
+            if [[ "$existing_target" == *gpushare* ]]; then
+                skipped=$((skipped + 1))
+                continue
+            fi
+        fi
+
         # Back up any existing real CUDA library before overriding
         if [[ -e "$sys_path" ]] && [[ ! -L "$sys_path" ]]; then
             # It's a real file (not a symlink) — back it up
@@ -653,28 +676,48 @@ if [[ "$NO_SYMLINKS" == false ]]; then
                 info "Backed up $sys_path to $LIB_DIR/real/$link"
             fi
         elif [[ -L "$sys_path" ]]; then
-            existing_target=$(readlink -f "$sys_path" 2>/dev/null || true)
-            if [[ "$existing_target" == *gpushare* ]]; then
-                skipped=$((skipped + 1))
-                continue  # already points to gpushare
-            fi
             # Symlink to something else (e.g., real NVIDIA driver) — back up target
-            if [[ -f "$existing_target" ]] && [[ "$existing_target" != *gpushare* ]]; then
+            real_path=$(readlink -f "$sys_path" 2>/dev/null || true)
+            if [[ -f "$real_path" ]] && [[ "$real_path" != *gpushare* ]]; then
                 mkdir -p "$LIB_DIR/real"
                 if [[ ! -f "$LIB_DIR/real/$link" ]]; then
-                    cp "$existing_target" "$LIB_DIR/real/$link"
-                    info "Backed up $link (from $existing_target)"
+                    cp "$real_path" "$LIB_DIR/real/$link"
+                    info "Backed up $link from $real_path"
                 fi
             fi
         fi
-        ln -sf "$target" "$sys_path"
-        created=$((created + 1))
+
+        # Remove existing file/link first, then create symlink
+        # This ensures proper symlink creation even if there are permission issues
+        rm -f "$sys_path" 2>/dev/null || true
+        ln -sf "$target" "$sys_path" 2>/dev/null || {
+            # If ln failed, try with absolute target path
+            abs_target=$(readlink -f "$target" 2>/dev/null || echo "$target")
+            ln -sf "$abs_target" "$sys_path" 2>/dev/null || true
+        }
+
+        # Verify the symlink was created correctly
+        if [[ -L "$sys_path" ]]; then
+            link_target=$(readlink -f "$sys_path" 2>/dev/null || true)
+            if [[ "$link_target" == *gpushare* ]]; then
+                created=$((created + 1))
+            else
+                failed=$((failed + 1))
+                warn "Failed to create symlink: $sys_path -> $link_target (expected gpushare)"
+            fi
+        else
+            failed=$((failed + 1))
+            warn "Failed to create symlink: $sys_path"
+        fi
     done
 
     if [[ $skipped -gt 0 ]]; then
         ok "CUDA symlinks: $created created, $skipped already correct"
     else
         ok "All $created CUDA library symlinks created in $SYS_LIB_DIR"
+    fi
+    if [[ $failed -gt 0 ]]; then
+        warn "$failed symlinks failed to create — run with sudo to fix"
     fi
 
     # Verify the critical symlink resolves correctly
@@ -684,9 +727,14 @@ if [[ "$NO_SYMLINKS" == false ]]; then
             ok "Verified: $SYS_LIB_DIR/libcuda.so.1 -> gpushare"
         else
             warn "libcuda.so.1 in $SYS_LIB_DIR does not point to gpushare"
+            # Try to fix it one more time
+            rm -f "$SYS_LIB_DIR/libcuda.so.1" 2>/dev/null || true
+            ln -sf "$target" "$SYS_LIB_DIR/libcuda.so.1" 2>/dev/null || true
         fi
     else
         warn "libcuda.so.1 symlink not found in $SYS_LIB_DIR"
+        # Try to create it
+        ln -sf "$target" "$SYS_LIB_DIR/libcuda.so.1" 2>/dev/null || true
     fi
 else
     info "Skipping CUDA symlinks (--no-symlinks)"
