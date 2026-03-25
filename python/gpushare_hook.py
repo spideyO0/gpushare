@@ -495,21 +495,21 @@ class _CleanNameProps:
 def _do_patch():
     """Apply all PyTorch patches. Called once when torch.cuda is fully loaded."""
     global _patched
-
-    with _lock:
-        if _patched:
-            return
-        _patched = True
-
-    if _device_count == 0:
+    if _patched:
         return
+    _patched = True
 
-    # Use sys.modules directly — do NOT call `import torch` here.
-    # The import-depth tracking in install() guarantees these are fully loaded.
-    torch = sys.modules.get("torch")
-    torch_cuda = sys.modules.get("torch.cuda")
-    if torch is None or torch_cuda is None:
-        _patched = False  # retry later
+    # Skip all patches - C++ library handles everything now
+    sys.stderr.write(
+        "[gpushare] Hook: C++ library handles all, skipping Python patches\n"
+    )
+    return
+
+
+# Dummy class to avoid import errors
+class _DeviceProps:
+    def __init__(self, info):
+        pass
         return
 
     # Use local refs — avoids any further import calls inside _do_patch
