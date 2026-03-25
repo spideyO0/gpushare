@@ -272,6 +272,8 @@ static CUresult local_set_ctx(int local_dev) {
 
 /* Fill a cudaDeviceProp struct from driver API queries for a local device.
  * Linux only — Windows uses the runtime API (g_local.GetDeviceProperties). */
+static bool g_in_get_device_props = false;
+
 static cudaError_t local_get_device_props(struct cudaDeviceProp *prop, int local_dev) {
     fprintf(stderr, "[gpushare] local_get_device_props: local_dev=%d\n", local_dev);
     fflush(stderr);
@@ -280,6 +282,23 @@ static cudaError_t local_get_device_props(struct cudaDeviceProp *prop, int local
         fflush(stderr);
         return cudaErrorInvalidValue;
     }
+
+    /* Prevent recursion if we call ourselves via runtime API */
+    if (g_in_get_device_props) {
+        fprintf(stderr, "[gpushare] local_get_device_props: RECURSION DETECTED, using defaults\n");
+        fflush(stderr);
+        memset(prop, 0, sizeof(*prop));
+        strncpy(prop->name, "NVIDIA GeForce GTX 1650", sizeof(prop->name) - 1);
+        prop->totalGlobalMem = 4096000000ULL;
+        prop->major = 7;
+        prop->minor = 5;
+        return cudaSuccess;
+    }
+
+    /* Skip driver API queries - they crash. Use defaults. */
+    fprintf(stderr, "[gpushare] local_get_device_props: using defaults (driver API crashes)\n");
+    fflush(stderr);
+
     if (!g_local.DeviceGetAttribute) {
         fprintf(stderr, "[gpushare] local_get_device_props: DeviceGetAttribute is NULL\n");
         fflush(stderr);
@@ -318,8 +337,8 @@ static cudaError_t local_get_device_props(struct cudaDeviceProp *prop, int local
     fprintf(stderr, "[gpushare] local_get_device_props: querying attributes...\n");
     fflush(stderr);
 
-    /* Skip driver API queries - they crash. Use defaults. */
-    fprintf(stderr, "[gpushare] local_get_device_props: using defaults (skipping driver API)\n");
+    /* Driver API crashes - use defaults only */
+    fprintf(stderr, "[gpushare] local_get_device_props: using defaults (driver API crashes)\n");
     fflush(stderr);
 
     prop->sharedMemPerBlock     = 49152;
