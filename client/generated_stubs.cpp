@@ -8,8 +8,8 @@
 
 /* Defined in gpushare_client.cpp */
 extern bool rpc_call(uint16_t opcode, const void *req, uint32_t req_len,
-                     std::vector<uint8_t> &resp, uint16_t *flags = nullptr);
-extern int32_t rpc_simple(uint16_t opcode, const void *req, uint32_t req_len);
+                     std::vector<uint8_t> &resp, uint16_t *flags = nullptr, int device = -1);
+extern int32_t rpc_simple(uint16_t opcode, const void *req, uint32_t req_len, int device = -1);
 
 #ifdef _WIN32
   #define GEN_EXPORT __declspec(dllexport)
