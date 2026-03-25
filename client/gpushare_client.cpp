@@ -2134,6 +2134,7 @@ GPUSHARE_EXPORT CUresult cuDeviceGetCount(int *count) {
     TRACE("cuDeviceGetCount");
     int c = 0;
     cudaError_t err = cudaGetDeviceCount(&c);
+    fprintf(stderr, "[gpushare] cuDeviceGetCount: returning %d\n", c);
     if (count) *count = c;
     return (err == cudaSuccess || c > 0) ? CUDA_SUCCESS : CUDA_ERROR_NO_DEVICE;
 }
