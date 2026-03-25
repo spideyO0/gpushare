@@ -292,6 +292,8 @@ static cudaError_t local_get_device_props(struct cudaDeviceProp *prop, int local
         fprintf(stderr, "[gpushare] local_get_device_props: calling DeviceGet\n");
         fflush(stderr);
         g_local.DeviceGet(&dev, local_dev);
+        fprintf(stderr, "[gpushare] local_get_device_props: after DeviceGet\n");
+        fflush(stderr);
     } else {
         dev = (CUdevice)local_dev;
     }
@@ -299,10 +301,18 @@ static cudaError_t local_get_device_props(struct cudaDeviceProp *prop, int local
     fflush(stderr);
 
     if (g_local.DeviceGetName) {
+        fprintf(stderr, "[gpushare] local_get_device_props: calling DeviceGetName\n");
+        fflush(stderr);
         g_local.DeviceGetName(prop->name, sizeof(prop->name), dev);
+        fprintf(stderr, "[gpushare] local_get_device_props: after DeviceGetName\n");
+        fflush(stderr);
     }
     if (g_local.DeviceTotalMem) {
+        fprintf(stderr, "[gpushare] local_get_device_props: calling DeviceTotalMem\n");
+        fflush(stderr);
         g_local.DeviceTotalMem(&prop->totalGlobalMem, dev);
+        fprintf(stderr, "[gpushare] local_get_device_props: after DeviceTotalMem\n");
+        fflush(stderr);
     }
 
     auto ga = [&](CUdevice_attribute attr) -> int {
@@ -1368,6 +1378,8 @@ GPUSHARE_EXPORT cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop,
     if (g_local.available && !is_remote_device(device)) {
         fprintf(stderr, "[gpushare] cudaGetDeviceProperties: querying LOCAL device\n");
         fflush(stderr);
+        /* Activate local CUDA context for this device */
+        local_set_ctx(to_local_device(device));
 #ifdef _WIN32
         if (g_local.GetDeviceProperties) {
             cudaError_t err = g_local.GetDeviceProperties(prop, to_local_device(device));
