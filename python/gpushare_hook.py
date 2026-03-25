@@ -593,25 +593,9 @@ def _do_patch():
 
         tc.get_device_name = _patched_get_device_name
 
-    # ── 7. get_device_properties — use gpushare data first, original as fallback ──
-    if hasattr(tc, "get_device_properties"):
-        _orig_get_props = tc.get_device_properties
-
-        def _patched_get_device_properties(device=None):
-            idx = _resolve_device(device)
-            if 0 <= idx < len(_devices):
-                return _DeviceProps(_devices[idx])
-            try:
-                p = _orig_get_props(device)
-                if hasattr(p, "name") and (
-                    " (remote)" in p.name or " (local)" in p.name
-                ):
-                    return _CleanNameProps(p)
-                return p
-            except Exception:
-                raise
-
-        tc.get_device_properties = _patched_get_device_properties
+    # ── 7. get_device_properties — skip our fake props, let C++ handle it ──
+    # Note: We don't patch this because the C++ library handles it correctly.
+    # The hook's fake _DeviceProps can cause crashes in PyTorch.
 
     # ── 8. mem_get_info — ctypes fallback ──
     if hasattr(tc, "mem_get_info"):
