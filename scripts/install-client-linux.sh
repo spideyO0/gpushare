@@ -1067,15 +1067,18 @@ install_python_hooks
 # - libcublas.so.11, libcublas.so.12 (cuBLAS)
 # - libcudnn.so.8, libcudnn.so.9 (cuDNN)
 # And other library-specific libraries
-if [[ "$NO_SYMLINKS" == false ]] && [[ "$LIB_UPDATED" == true || "$FORCE_REINSTALL" == true ]]; then
+
+# Always try to replace PyTorch CUDA libs (skip only if --no-symlinks)
+if [[ "$NO_SYMLINKS" == false ]]; then
     info "Checking for PyTorch bundled CUDA libraries to replace..."
 
     TORCH_LIBS_REPLACED=0
 
     # Find all site-packages directories with potential PyTorch CUDA libs
     # Use find to properly expand wildcards
-    info "Searching in: $REAL_HOME/.local/lib"
+    info "REAL_HOME=$REAL_HOME, searching in: $REAL_HOME/.local/lib"
     SITE_PACKAGES_DIRS=$(find /usr/lib /usr/local/lib "$REAL_HOME/.local/lib" "$REAL_HOME/.pyenv/versions" "$REAL_HOME/miniconda3" "$REAL_HOME/anaconda3" "$REAL_HOME/.virtualenvs" -maxdepth 4 -type d -name "site-packages" 2>/dev/null || true)
+    info "Found site-packages: $SITE_PACKAGES_DIRS"
 
     # PyTorch CUDA library patterns to replace (newer PyTorch uses nvidia/cuXX)
     TORCH_LIB_PATTERNS=(
