@@ -1277,7 +1277,15 @@ bool rpc_call(uint16_t opcode, const void *req_payload, uint32_t req_len,
                      std::vector<uint8_t> &resp_payload, uint16_t *resp_flags = nullptr, int device = -1) {
     if (!ensure_connected()) return false;
     ServerConnection *sc = active_server(device);
-    if (!sc) { ERR("No active server for rpc_call"); return false; }
+    if (!sc) {
+        // Only log error if we're trying to use remote GPU
+        if (device < 0 && is_remote_device(g_active_device)) {
+            ERR("No active server for rpc_call (device=%d, active=%d)", device, g_active_device);
+        } else if (device >= 0 && is_remote_device(device)) {
+            ERR("No active server for rpc_call (device=%d)", device);
+        }
+        return false;
+    }
     return sc->rpc(opcode, req_payload, req_len, resp_payload, resp_flags);
 }
 
