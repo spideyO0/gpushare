@@ -25,7 +25,7 @@ import builtins
 
 _patched = False
 _lock = threading.Lock()
-_devices = []       # [{name, major, minor, total_mem, sm_count, is_remote, ...}]
+_devices = []  # [{name, major, minor, total_mem, sm_count, is_remote, ...}]
 _device_count = 0
 _libcuda = None
 
@@ -33,6 +33,7 @@ _libcuda = None
 # ════════════════════════════════════════════════════════════
 #  Phase 1: ctypes discovery (fast, no network overhead)
 # ════════════════════════════════════════════════════════════
+
 
 def _load_cuda_lib():
     """Load the CUDA driver library.
@@ -47,7 +48,7 @@ def _load_cuda_lib():
     if _libcuda is not None:
         return _libcuda
 
-    if sys.platform == 'win32':
+    if sys.platform == "win32":
         # On Windows: try our gpushare DLL by FULL PATH first.
         # This ensures we load ours, not the real nvcuda.dll from System32.
         # Once loaded, Windows will reuse it for any subsequent LoadLibrary('nvcuda.dll')
@@ -56,35 +57,41 @@ def _load_cuda_lib():
 
         # 1. torch\lib (highest priority - PyTorch adds this via os.add_dll_directory)
         try:
-            torch_mod = sys.modules.get('torch')
-            if torch_mod and hasattr(torch_mod, '__file__'):
-                tlib = os.path.join(os.path.dirname(torch_mod.__file__), 'lib')
-                gpushare_paths.append(os.path.join(tlib, 'nvcuda.dll'))
+            torch_mod = sys.modules.get("torch")
+            if torch_mod and hasattr(torch_mod, "__file__"):
+                tlib = os.path.join(os.path.dirname(torch_mod.__file__), "lib")
+                gpushare_paths.append(os.path.join(tlib, "nvcuda.dll"))
         except Exception:
             pass
         # Also try common torch locations for MS Store Python
         for pyExe in [sys.executable]:
             if pyExe:
                 # Standard Python: <python_dir>/Lib/site-packages/torch/lib
-                sp = os.path.join(os.path.dirname(pyExe), 'Lib', 'site-packages', 'torch', 'lib')
-                gpushare_paths.append(os.path.join(sp, 'nvcuda.dll'))
+                sp = os.path.join(
+                    os.path.dirname(pyExe), "Lib", "site-packages", "torch", "lib"
+                )
+                gpushare_paths.append(os.path.join(sp, "nvcuda.dll"))
                 # MS Store Python user packages
-                lp = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Packages')
+                lp = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages")
                 if os.path.isdir(lp):
                     for pkg in os.listdir(lp):
-                        if 'Python' in pkg:
-                            tp = os.path.join(lp, pkg, 'LocalCache', 'local-packages')
+                        if "Python" in pkg:
+                            tp = os.path.join(lp, pkg, "LocalCache", "local-packages")
                             for pyver in os.listdir(tp) if os.path.isdir(tp) else []:
-                                sp2 = os.path.join(tp, pyver, 'site-packages', 'torch', 'lib')
-                                gpushare_paths.append(os.path.join(sp2, 'nvcuda.dll'))
+                                sp2 = os.path.join(
+                                    tp, pyver, "site-packages", "torch", "lib"
+                                )
+                                gpushare_paths.append(os.path.join(sp2, "nvcuda.dll"))
 
         # 2. gpushare install directory
-        pf = os.environ.get('ProgramFiles', r'C:\Program Files')
-        gpushare_paths.append(os.path.join(pf, 'gpushare', 'nvcuda.dll'))
-        gpushare_paths.append(os.path.join(pf, 'gpushare', 'gpushare_client.dll'))
+        pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+        gpushare_paths.append(os.path.join(pf, "gpushare", "nvcuda.dll"))
+        gpushare_paths.append(os.path.join(pf, "gpushare", "gpushare_client.dll"))
 
         # 3. Python directory
-        gpushare_paths.append(os.path.join(os.path.dirname(sys.executable), 'nvcuda.dll'))
+        gpushare_paths.append(
+            os.path.join(os.path.dirname(sys.executable), "nvcuda.dll")
+        )
 
         for path in gpushare_paths:
             if not os.path.isfile(path):
@@ -97,28 +104,28 @@ def _load_cuda_lib():
 
         # 4. Fallback: generic name (will find System32 real driver)
         try:
-            _libcuda = ctypes.CDLL('nvcuda.dll')
+            _libcuda = ctypes.CDLL("nvcuda.dll")
             return _libcuda
         except OSError:
             pass
 
-    elif sys.platform == 'linux':
-        for name in ['libcuda.so.1', 'libcuda.so']:
+    elif sys.platform == "linux":
+        for name in ["libcuda.so.1", "libcuda.so"]:
             try:
                 _libcuda = ctypes.CDLL(name)
                 return _libcuda
             except OSError:
                 continue
 
-    elif sys.platform == 'darwin':
-        for name in ['libcuda.dylib', 'libcuda.1.dylib']:
+    elif sys.platform == "darwin":
+        for name in ["libcuda.dylib", "libcuda.1.dylib"]:
             try:
                 _libcuda = ctypes.CDLL(name)
                 return _libcuda
             except OSError:
                 continue
 
-    path = ctypes.util.find_library('cuda')
+    path = ctypes.util.find_library("cuda")
     if path:
         try:
             _libcuda = ctypes.CDLL(path)
@@ -166,8 +173,8 @@ def _query_devices_ctypes_inner():
             lib.cuDeviceGetName(name_buf, ctypes.c_int(256), dev)
         except Exception:
             pass
-        raw_name = name_buf.value.decode('utf-8', errors='replace')
-        clean_name = raw_name.replace(' (remote)', '').replace(' (local)', '')
+        raw_name = name_buf.value.decode("utf-8", errors="replace")
+        clean_name = raw_name.replace(" (remote)", "").replace(" (local)", "")
 
         # Compute capability
         major = ctypes.c_int(0)
@@ -183,7 +190,7 @@ def _query_devices_ctypes_inner():
 
         # Total memory
         total_mem = ctypes.c_size_t(0)
-        for fn_name in ('cuDeviceTotalMem_v2', 'cuDeviceTotalMem'):
+        for fn_name in ("cuDeviceTotalMem_v2", "cuDeviceTotalMem"):
             fn = getattr(lib, fn_name, None)
             if fn:
                 try:
@@ -199,15 +206,17 @@ def _query_devices_ctypes_inner():
         except Exception:
             pass
 
-        _devices.append({
-            'name': clean_name,
-            'raw_name': raw_name,
-            'major': major.value,
-            'minor': minor.value,
-            'total_mem': total_mem.value,
-            'sm_count': sm_count.value,
-            'is_remote': '(remote)' in raw_name,
-        })
+        _devices.append(
+            {
+                "name": clean_name,
+                "raw_name": raw_name,
+                "major": major.value,
+                "minor": minor.value,
+                "total_mem": total_mem.value,
+                "sm_count": sm_count.value,
+                "is_remote": "(remote)" in raw_name,
+            }
+        )
 
 
 def _query_devices_ctypes():
@@ -241,11 +250,12 @@ _OP_GET_DEVICE_PROPS = 0x0011
 def _read_server_config():
     """Read gpushare server address from config files."""
     # Environment variable first
-    env = os.environ.get('GPUSHARE_SERVER')
+    env = os.environ.get("GPUSHARE_SERVER")
     if env:
         return env
 
     import platform as _plat
+
     candidates = []
     home = os.path.expanduser("~")
     if _plat.system() == "Windows":
@@ -288,8 +298,8 @@ def _query_remote_gpus_tcp():
 
     # Parse host:port
     host, port = server_addr, 9847
-    if ':' in server_addr:
-        parts = server_addr.rsplit(':', 1)
+    if ":" in server_addr:
+        parts = server_addr.rsplit(":", 1)
         host = parts[0]
         try:
             port = int(parts[1])
@@ -323,6 +333,7 @@ def _query_remote_gpus_tcp():
             return b"".join(chunks)
 
         req_id = [1]
+
         def _rpc(opcode, payload=b""):
             rid = req_id[0]
             req_id[0] += 1
@@ -354,15 +365,17 @@ def _query_remote_gpus_tcp():
             fmt = "<QQ" + "i" * 14 + "QQQ"
             vals = struct.unpack_from(fmt, resp, 256)
 
-            _devices.append({
-                'name': name,
-                'raw_name': name + ' (remote)',
-                'major': vals[12],
-                'minor': vals[13],
-                'total_mem': vals[0],
-                'sm_count': vals[14],
-                'is_remote': True,
-            })
+            _devices.append(
+                {
+                    "name": name,
+                    "raw_name": name + " (remote)",
+                    "major": vals[12],
+                    "minor": vals[13],
+                    "total_mem": vals[0],
+                    "sm_count": vals[14],
+                    "is_remote": True,
+                }
+            )
             _device_count += 1
 
         # CLOSE
@@ -389,7 +402,7 @@ def _ctypes_mem_info():
         return (0, 0)
     free = ctypes.c_size_t(0)
     total = ctypes.c_size_t(0)
-    for fn_name in ('cuMemGetInfo_v2', 'cuMemGetInfo'):
+    for fn_name in ("cuMemGetInfo_v2", "cuMemGetInfo"):
         fn = getattr(lib, fn_name, None)
         if fn:
             try:
@@ -404,6 +417,7 @@ def _ctypes_mem_info():
 #  Device resolution helper
 # ════════════════════════════════════════════════════════════
 
+
 def _resolve_device(device):
     """Convert device arg (int, str, torch.device) to integer index."""
     if device is None:
@@ -411,13 +425,13 @@ def _resolve_device(device):
     if isinstance(device, int):
         return device
     if isinstance(device, str):
-        if device.startswith('cuda:'):
+        if device.startswith("cuda:"):
             try:
-                return int(device.split(':')[1])
+                return int(device.split(":")[1])
             except (ValueError, IndexError):
                 return 0
         return 0
-    idx = getattr(device, 'index', None)
+    idx = getattr(device, "index", None)
     return idx if idx is not None else 0
 
 
@@ -425,14 +439,16 @@ def _resolve_device(device):
 #  Fake device properties (fallback when C-level fails)
 # ════════════════════════════════════════════════════════════
 
+
 class _DeviceProps:
     """Mimics torch.cuda._CudaDeviceProperties."""
+
     def __init__(self, info):
-        self.name = info['name']
-        self.major = info['major']
-        self.minor = info['minor']
-        self.total_memory = info['total_mem']
-        self.multi_processor_count = info['sm_count']
+        self.name = info["name"]
+        self.major = info["major"]
+        self.minor = info["minor"]
+        self.total_memory = info["total_mem"]
+        self.multi_processor_count = info["sm_count"]
         self.is_integrated = False
         self.is_multi_gpu_board = False
         self.max_threads_per_block = 1024
@@ -442,34 +458,39 @@ class _DeviceProps:
         self.warp_size = 32
         self.max_block_dim = (1024, 1024, 64)
         self.max_grid_dim = (2147483647, 65535, 65535)
-        self.gcnArchName = ''
+        self.gcnArchName = ""
 
     def __repr__(self):
         mb = self.total_memory // (1024 * 1024) if self.total_memory else 0
-        return (f"_CudaDeviceProperties(name='{self.name}', major={self.major}, "
-                f"minor={self.minor}, total_memory={mb}MB, "
-                f"multi_processor_count={self.multi_processor_count})")
+        return (
+            f"_CudaDeviceProperties(name='{self.name}', major={self.major}, "
+            f"minor={self.minor}, total_memory={mb}MB, "
+            f"multi_processor_count={self.multi_processor_count})"
+        )
 
 
 class _CleanNameProps:
     """Wraps real CUDADeviceProperties to strip (remote)/(local) from name."""
-    __slots__ = ('_inner', 'name')
+
+    __slots__ = ("_inner", "name")
 
     def __init__(self, inner):
-        object.__setattr__(self, '_inner', inner)
-        object.__setattr__(self, 'name',
-                           inner.name.replace(' (remote)', '').replace(' (local)', ''))
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(
+            self, "name", inner.name.replace(" (remote)", "").replace(" (local)", "")
+        )
 
     def __getattr__(self, attr):
         return getattr(self._inner, attr)
 
     def __repr__(self):
-        return repr(self._inner).replace(' (remote)', '').replace(' (local)', '')
+        return repr(self._inner).replace(" (remote)", "").replace(" (local)", "")
 
 
 # ════════════════════════════════════════════════════════════
 #  Patch torch.cuda after it is fully loaded
 # ════════════════════════════════════════════════════════════
+
 
 def _do_patch():
     """Apply all PyTorch patches. Called once when torch.cuda is fully loaded."""
@@ -485,8 +506,8 @@ def _do_patch():
 
     # Use sys.modules directly — do NOT call `import torch` here.
     # The import-depth tracking in install() guarantees these are fully loaded.
-    torch = sys.modules.get('torch')
-    torch_cuda = sys.modules.get('torch.cuda')
+    torch = sys.modules.get("torch")
+    torch_cuda = sys.modules.get("torch.cuda")
     if torch is None or torch_cuda is None:
         _patched = False  # retry later
         return
@@ -495,7 +516,7 @@ def _do_patch():
     tc = torch_cuda
 
     # Determine how many GPUs are local vs remote
-    _local_gpu_count = sum(1 for d in _devices if not d.get('is_remote'))
+    _local_gpu_count = sum(1 for d in _devices if not d.get("is_remote"))
     _active_device = [0]  # track current device (local or remote)
 
     # Collect SM architectures from all detected devices
@@ -504,83 +525,98 @@ def _do_patch():
         sm_archs.add(f"sm_{d['major']}{d['minor']}")
 
     # ── 1. get_arch_list — include remote GPU SM architectures ──
-    if hasattr(tc, 'get_arch_list'):
+    if hasattr(tc, "get_arch_list"):
         _orig_get_arch_list = tc.get_arch_list
+
         def _patched_get_arch_list():
             archs = list(_orig_get_arch_list())
             for sm in sm_archs:
                 if sm not in archs:
                     archs.append(sm)
             return archs
+
         tc.get_arch_list = _patched_get_arch_list
 
     # ── 2. Neutralize capability / cubin checks ──
-    for name in ('_check_capability', '_check_cubins'):
+    for name in ("_check_capability", "_check_cubins"):
         if hasattr(tc, name):
             setattr(tc, name, lambda: None)
 
     # ── 3. is_available — True if we have any GPUs ──
     _orig_is_available = tc.is_available
+
     def _patched_is_available():
         if _device_count > 0:
             return True
         return _orig_is_available()
+
     tc.is_available = _patched_is_available
 
     # ── 4. device_count — correct count ──
     _orig_device_count = tc.device_count
+
     def _patched_device_count():
         if _device_count > 0:
             return _device_count
         return _orig_device_count()
+
     tc.device_count = _patched_device_count
 
     # ── 5. get_device_capability — ctypes fallback ──
-    if hasattr(tc, 'get_device_capability'):
+    if hasattr(tc, "get_device_capability"):
         _orig_get_cap = tc.get_device_capability
+
         def _patched_get_device_capability(device=None):
             try:
                 return _orig_get_cap(device)
             except Exception:
                 idx = _resolve_device(device)
                 if 0 <= idx < len(_devices):
-                    return (_devices[idx]['major'], _devices[idx]['minor'])
+                    return (_devices[idx]["major"], _devices[idx]["minor"])
                 return (0, 0)
+
         tc.get_device_capability = _patched_get_device_capability
 
     # ── 6. get_device_name — use gpushare data first, original as fallback ──
-    if hasattr(tc, 'get_device_name'):
+    if hasattr(tc, "get_device_name"):
         _orig_get_name = tc.get_device_name
+
         def _patched_get_device_name(device=None):
             idx = _resolve_device(device)
             if 0 <= idx < len(_devices):
-                return _devices[idx]['name']
+                return _devices[idx]["name"]
             try:
                 n = _orig_get_name(device)
-                return n.replace(' (remote)', '').replace(' (local)', '')
+                return n.replace(" (remote)", "").replace(" (local)", "")
             except Exception:
-                return 'Unknown GPU'
+                return "Unknown GPU"
+
         tc.get_device_name = _patched_get_device_name
 
     # ── 7. get_device_properties — use gpushare data first, original as fallback ──
-    if hasattr(tc, 'get_device_properties'):
+    if hasattr(tc, "get_device_properties"):
         _orig_get_props = tc.get_device_properties
+
         def _patched_get_device_properties(device=None):
             idx = _resolve_device(device)
             if 0 <= idx < len(_devices):
                 return _DeviceProps(_devices[idx])
             try:
                 p = _orig_get_props(device)
-                if hasattr(p, 'name') and (' (remote)' in p.name or ' (local)' in p.name):
+                if hasattr(p, "name") and (
+                    " (remote)" in p.name or " (local)" in p.name
+                ):
                     return _CleanNameProps(p)
                 return p
             except Exception:
                 raise
+
         tc.get_device_properties = _patched_get_device_properties
 
     # ── 8. mem_get_info — ctypes fallback ──
-    if hasattr(tc, 'mem_get_info'):
+    if hasattr(tc, "mem_get_info"):
         _orig_mem_info = tc.mem_get_info
+
         def _patched_mem_get_info(device=None):
             try:
                 return _orig_mem_info(device)
@@ -589,21 +625,24 @@ def _do_patch():
                 if 0 <= idx < len(_devices):
                     free, total = _ctypes_mem_info()
                     if total == 0:
-                        total = _devices[idx]['total_mem']
+                        total = _devices[idx]["total_mem"]
                     if free == 0:
                         free = total
                     return (free, total)
                 return (0, 0)
+
         tc.mem_get_info = _patched_mem_get_info
 
     # ── 9. memory_allocated — graceful fallback ──
-    if hasattr(tc, 'memory_allocated'):
+    if hasattr(tc, "memory_allocated"):
         _orig_mem_alloc = tc.memory_allocated
+
         def _patched_memory_allocated(device=None):
             try:
                 return _orig_mem_alloc(device)
             except Exception:
                 return 0
+
         tc.memory_allocated = _patched_memory_allocated
 
     # ── 10. _lazy_init — recover from initialization failures ──
@@ -613,37 +652,48 @@ def _do_patch():
     # discovered GPUs, we attempt the C++ init in a daemon thread with a
     # timeout. If it succeeds, great. If it hangs or fails, we mark as
     # initialized anyway so tensor operations can proceed via our driver.
-    if hasattr(tc, '_lazy_init'):
+    if hasattr(tc, "_lazy_init"):
         _orig_lazy_init = tc._lazy_init
         _init_done = [False]
+
         def _patched_lazy_init():
             if _init_done[0]:
                 return
             if _device_count > 0:
                 import threading
+
                 _init_ok = [False]
+
                 def _try_init():
                     try:
                         _orig_lazy_init()
                         _init_ok[0] = True
                     except Exception:
                         pass
+
                 t = threading.Thread(target=_try_init, daemon=True)
                 t.start()
                 t.join(timeout=5.0)  # 5 second timeout
                 _init_done[0] = True
-                if hasattr(tc, '_initialized'):
+                if hasattr(tc, "_initialized"):
                     tc._initialized = True
                 if not _init_ok[0]:
                     # C++ init hung or failed — process queued calls manually
-                    if hasattr(tc, '_queued_calls'):
+                    if hasattr(tc, "_queued_calls"):
                         for fn_and_args in tc._queued_calls:
                             if callable(fn_and_args):
-                                try: fn_and_args()
-                                except Exception: pass
-                            elif isinstance(fn_and_args, (tuple, list)) and len(fn_and_args) >= 1:
-                                try: fn_and_args[0](*fn_and_args[1:])
-                                except Exception: pass
+                                try:
+                                    fn_and_args()
+                                except Exception:
+                                    pass
+                            elif (
+                                isinstance(fn_and_args, (tuple, list))
+                                and len(fn_and_args) >= 1
+                            ):
+                                try:
+                                    fn_and_args[0](*fn_and_args[1:])
+                                except Exception:
+                                    pass
                         tc._queued_calls = []
                 return
             try:
@@ -651,52 +701,56 @@ def _do_patch():
                 _init_done[0] = True
             except Exception:
                 raise
+
         tc._lazy_init = _patched_lazy_init
 
     # ── 11. Suppress SM compatibility warnings ──
     import warnings
+
     _orig_warn = warnings.warn
     _suppress_patterns = (
-        'not compatible',
-        'sm_1',
-        'not currently supported',
-        'Targeting sm_',
-        'not in the list of supported',
-        'UserWarning: CUDA initialization',
+        "not compatible",
+        "sm_1",
+        "not currently supported",
+        "Targeting sm_",
+        "not in the list of supported",
+        "UserWarning: CUDA initialization",
     )
+
     def _filtered_warn(message, *args, **kwargs):
         s = str(message)
         for pat in _suppress_patterns:
             if pat in s:
                 return
         return _orig_warn(message, *args, **kwargs)
+
     warnings.warn = _filtered_warn
 
     # ── 12. torch.backends.cudnn — enable for remote GPUs ──
-    _cudnn = sys.modules.get('torch.backends.cudnn')
+    _cudnn = sys.modules.get("torch.backends.cudnn")
     if _cudnn is not None:
         try:
-            if hasattr(_cudnn, 'is_available') and not _cudnn.is_available():
+            if hasattr(_cudnn, "is_available") and not _cudnn.is_available():
                 _cudnn.is_available = lambda: True
-            if hasattr(_cudnn, 'enabled'):
+            if hasattr(_cudnn, "enabled"):
                 _cudnn.enabled = True
         except Exception:
             pass
 
     # ── 13. torch.backends.cuda.is_built ──
-    _cuda_be = sys.modules.get('torch.backends.cuda')
+    _cuda_be = sys.modules.get("torch.backends.cuda")
     if _cuda_be is not None:
         try:
-            if hasattr(_cuda_be, 'is_built') and not _cuda_be.is_built():
+            if hasattr(_cuda_be, "is_built") and not _cuda_be.is_built():
                 _cuda_be.is_built = lambda: True
         except Exception:
             pass
 
     # ── 14. torch.version.cuda — set if CPU-only build ──
     try:
-        torch_version = getattr(torch, 'version', None)
-        if torch_version and getattr(torch_version, 'cuda', None) is None:
-            torch_version.cuda = '13.1'
+        torch_version = getattr(torch, "version", None)
+        if torch_version and getattr(torch_version, "cuda", None) is None:
+            torch_version.cuda = "13.1"
     except Exception:
         pass
 
@@ -704,8 +758,9 @@ def _do_patch():
     # On Windows with a local GPU, PyTorch's C++ backend only knows about
     # local GPUs. set_device(remote_idx) would call _cuda_setDevice which
     # fails with "invalid device ordinal". We intercept it here.
-    if hasattr(tc, 'set_device'):
+    if hasattr(tc, "set_device"):
         _orig_set_device = tc.set_device
+
         def _patched_set_device(device):
             idx = _resolve_device(device)
             _active_device[0] = idx
@@ -718,11 +773,13 @@ def _do_patch():
                 # If C library is NOT the active CUDA driver (Windows with local GPU),
                 # we track the selection here for Python-level queries.
                 pass
+
         tc.set_device = _patched_set_device
 
     # ── 16. current_device — return tracked device ──
-    if hasattr(tc, 'current_device'):
+    if hasattr(tc, "current_device"):
         _orig_current_device = tc.current_device
+
         def _patched_current_device():
             # If a remote device was selected, return it
             if _active_device[0] >= _local_gpu_count:
@@ -731,10 +788,11 @@ def _do_patch():
                 return _orig_current_device()
             except Exception:
                 return _active_device[0]
+
         tc.current_device = _patched_current_device
 
     # Status
-    gpus = ', '.join(f"{d['name']} (sm_{d['major']}{d['minor']})" for d in _devices)
+    gpus = ", ".join(f"{d['name']} (sm_{d['major']}{d['minor']})" for d in _devices)
     sys.stderr.write(f"[gpushare] {_device_count} GPU(s): {gpus}\n")
 
 
@@ -742,17 +800,18 @@ def _do_patch():
 #  Import hook — trigger patching when torch.cuda loads
 # ════════════════════════════════════════════════════════════
 
+
 def install():
     """Called from gpushare.pth at Python startup."""
     # Skip in test environments or when explicitly disabled
-    if os.environ.get('GPUSHARE_NO_HOOK'):
+    if os.environ.get("GPUSHARE_NO_HOOK"):
         return
 
     # Phase 1: Discover GPUs via ctypes (fast, no network)
     # SKIP on Windows: ctypes.CDLL loads our DLL from a different path than
     # torch\lib\nvcuda.dll, creating TWO DLL instances with separate static
     # state. The second instance's RPC hangs. Use TCP fallback instead.
-    if sys.platform != 'win32':
+    if sys.platform != "win32":
         try:
             _query_devices_ctypes()
         except Exception:
@@ -763,8 +822,8 @@ def install():
     #   - Windows (always — to avoid dual DLL instance issue)
     #   - Server machine (libcuda.so.1 is the real driver)
     #   - Any system where our C library isn't installed as the CUDA driver
-    has_remote = any(d.get('is_remote') for d in _devices)
-    if not has_remote:
+    # Skip TCP if ctypes already found devices (includes remote from our C++ lib)
+    if _device_count == 0:
         try:
             _query_remote_gpus_tcp()
         except Exception:
@@ -793,7 +852,7 @@ def install():
 
         # Only patch when we're back at the top level (all imports done)
         if _depth[0] == 0 and not _patched:
-            if 'torch.cuda' in sys.modules:
+            if "torch.cuda" in sys.modules:
                 try:
                     _do_patch()
                 except Exception as e:
