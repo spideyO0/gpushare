@@ -1191,8 +1191,20 @@ static bool ensure_connected() {
     std::lock_guard<std::recursive_mutex> lock(g_connect_mtx);
     if (!g_servers.empty()) return true;  /* double-check after lock */
 
+    /* If gpu_mode=local, skip server connection entirely */
+    if (g_gpu_mode == "local") {
+        TRACE("gpu_mode=local - skipping server connection");
+        return true;
+    }
+
     fprintf(stderr, "[gpushare] ensure_connected: loading config...\n"); fflush(stderr);
     load_config();
+
+    /* After loading config, re-check gpu_mode in case it was set by config */
+    if (g_gpu_mode == "local") {
+        TRACE("gpu_mode=local (from config) - skipping server connection");
+        return true;
+    }
 
     /* Re-check: on Windows, load_config() → init_local_gpu() → real cudart →
      * cuInit() re-enters ensure_connected() and may have already connected. */
