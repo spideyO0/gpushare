@@ -1323,34 +1323,29 @@ extern "C" {
 
 GPUSHARE_EXPORT cudaError_t cudaGetDeviceCount(int *count) {
     TRACE("cudaGetDeviceCount");
-    fprintf(stderr, "[gpushare] cudaGetDeviceCount: ENTER\n");
-    fflush(stderr);
-
-    /* Ensure connection is established first — this also calls load_config()
-     * which runs init_local_gpu(), so local GPU count is only valid AFTER
-     * ensure_connected() returns. */
-    if (g_gpu_mode != "local") {
-        ensure_connected();
-    } else if (!g_local_initialized) {
-        /* Force init even in local-only mode */
-        load_config();
+    
+    // Force connection if not already done
+    static bool first_call = true;
+    if (first_call) {
+        first_call = false;
+        if (g_gpu_mode != "local") {
+            ensure_connected();
+        }
     }
 
     int total = 0;
 
-    /* Count local GPUs (must be AFTER ensure_connected/load_config) */
+    /* Count local GPUs */
     if (g_local.available && g_gpu_mode != "remote") {
         total += g_local.local_count;
     }
 
-    /* Count remote GPUs across all servers */
+    /* Count remote GPUs */
     if (g_gpu_mode != "local" && !g_servers.empty()) {
         total += g_total_remote_devices;
     }
     
     if (count) *count = total;
-    fprintf(stderr, "[gpushare] cudaGetDeviceCount: returning %d\n", total);
-    fflush(stderr);
     return total > 0 ? cudaSuccess : cudaErrorNoDevice;
 }
 
