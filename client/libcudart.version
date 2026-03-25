@@ -1,19 +1,18 @@
 /* Version script for gpushare client library.
  *
- * CUDA Runtime API (cuda*) gets libcudart.so.12 version.
- * Driver API and other libraries (cu*, nvml*, etc.) gets GPUSHARE_1.0 version.
+ * For now, using unversioned exports to avoid linker conflicts with
+ * overlapping wildcard patterns (cuda* and cu*) in version nodes.
+ * This should work with PyTorch which expects unversioned or libcudart.so.12 versions.
+ *
+ * TODO: Switch to versioned exports once we have a better pattern matching system
+ * that can separate cuda* (runtime) from cu* (driver) without overlaps.
  */
 
-/* CUDA Runtime API - must come FIRST so cuda* matches before cu* */
-libcudart.so.12 {
+/* Use default version (no explicit version tag) for all symbols */
+{
     global:
         cuda*;
         __cuda*;
-};
-
-/* Driver API, NVML, and other libraries */
-GPUSHARE_1.0 {
-    global:
         cu*;
         nvml*;
         nvl*;
@@ -26,4 +25,6 @@ GPUSHARE_1.0 {
         cusparse*;
         nvrtc*;
         nvjpeg*;
+    local:
+        *;
 };

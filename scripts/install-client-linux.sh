@@ -872,10 +872,19 @@ if [[ "$NO_SYMLINKS" == false ]] && [[ "$LIB_UPDATED" == true || "$FORCE_REINSTA
     TORCH_CUDART_REPLACED=0
 
     # Search all Python site-packages for torch's bundled libcudart.so.12
-    for sp_dir in /usr/lib/python*/site-packages /usr/local/lib/python*/site-packages /usr/lib/python*/dist-packages /usr/local/lib/python*/dist-packages; do
+    # Including pyenv, system, and venv directories
+    for sp_dir in /usr/lib/python*/site-packages /usr/local/lib/python*/site-packages \
+                 /usr/lib/python*/dist-packages /usr/local/lib/python*/dist-packages \
+                 /home/*/.pyenv/versions/*/lib/python*/site-packages \
+                 /home/*/venv/*/lib/python*/site-packages /home/*/.venv/*/lib/python*/site-packages \
+                 $HOME/.pyenv/versions/*/lib/python*/site-packages \
+                 $HOME/.local/lib/python*/site-packages \
+                 /home/*/miniconda*/envs/*/lib/python*/site-packages \
+                 /home/*/anaconda*/envs/*/lib/python*/site-packages; do
+        [[ -d "$sp_dir" ]] || continue
         torch_cudart="$sp_dir/nvidia/cuda_runtime/lib/libcudart.so.12"
         if [[ -f "$torch_cudart" ]]; then
-            # Check if it's already our library
+            # Check if it's already our library (has __cudaRegisterFatBinary)
             if nm -D "$torch_cudart" 2>/dev/null | grep -q '__cudaRegisterFatBinary'; then
                 info "  $torch_cudart already replaced — skipping"
                 continue
@@ -885,26 +894,33 @@ if [[ "$NO_SYMLINKS" == false ]] && [[ "$LIB_UPDATED" == true || "$FORCE_REINSTA
                 cp "$torch_cudart" "${torch_cudart}.real"
                 info "  Backed up original: ${torch_cudart}.real"
             fi
-            cp "$LIB_DIR/libgpushare_client.so" "$torch_cudart"
+            cp "$LIB_DIR/libgpushare_client.so.1.0.0" "$torch_cudart"
+            chmod 644 "$torch_cudart"
             TORCH_CUDART_REPLACED=$((TORCH_CUDART_REPLACED + 1))
             ok "  Replaced: $torch_cudart"
         fi
     done
 
-    # Also check venvs and conda environments in common locations
-    for venv_dir in /home/*/venv /home/*/.venv /home/*/miniconda3/envs/*/lib/python*/site-packages /home/*/anaconda3/envs/*/lib/python*/site-packages; do
-        torch_cudart="$venv_dir/nvidia/cuda_runtime/lib/libcudart.so.12"
-        # Only check paths that actually exist (glob may not match)
-        [[ -f "$torch_cudart" ]] || continue
-        if nm -D "$torch_cudart" 2>/dev/null | grep -q '__cudaRegisterFatBinary'; then
-            continue
+    # Also check for torch/lib/cudart/cuda-runtime/lib/libcudart.so.12 (older PyTorch versions)
+    for sp_dir in /usr/lib/python*/site-packages /usr/local/lib/python*/site-packages \
+                 /usr/lib/python*/dist-packages /usr/local/lib/python*/dist-packages \
+                 /home/*/.pyenv/versions/*/lib/python*/site-packages \
+                 $HOME/.pyenv/versions/*/lib/python*/site-packages \
+                 /home/.local/lib/python*/site-packages; do
+        [[ -d "$sp_dir" ]] || continue
+        torch_cudart="$sp_dir/torch/lib/cudart/cuda-runtime/lib/libcudart.so.12"
+        if [[ -f "$torch_cudart" ]]; then
+            if nm -D "$torch_cudart" 2>/dev/null | grep -q '__cudaRegisterFatBinary'; then
+                continue
+            fi
+            if [[ ! -f "${torch_cudart}.real" ]]; then
+                cp "$torch_cudart" "${torch_cudart}.real"
+            fi
+            cp "$LIB_DIR/libgpushare_client.so.1.0.0" "$torch_cudart"
+            chmod 644 "$torch_cudart"
+            TORCH_CUDART_REPLACED=$((TORCH_CUDART_REPLACED + 1))
+            ok "  Replaced: $torch_cudart (old format)"
         fi
-        if [[ ! -f "${torch_cudart}.real" ]]; then
-            cp "$torch_cudart" "${torch_cudart}.real"
-        fi
-        cp "$LIB_DIR/libgpushare_client.so" "$torch_cudart"
-        TORCH_CUDART_REPLACED=$((TORCH_CUDART_REPLACED + 1))
-        ok "  Replaced: $torch_cudart"
     done
 
     if [[ $TORCH_CUDART_REPLACED -gt 0 ]]; then
